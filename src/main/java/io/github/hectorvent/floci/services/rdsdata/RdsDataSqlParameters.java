@@ -13,6 +13,7 @@ import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -177,13 +178,13 @@ final class RdsDataSqlParameters {
 
     private static void bindString(PreparedStatement statement, int index, String name, String value, String typeHint)
             throws SQLException {
-        String hint = typeHint == null ? "" : typeHint.toUpperCase();
+        String hint = typeHint == null ? "" : typeHint.toUpperCase(Locale.ROOT);
         try {
             switch (hint) {
                 case "DECIMAL" -> statement.setBigDecimal(index, new BigDecimal(value));
                 case "TIMESTAMP" -> statement.setTimestamp(index, Timestamp.valueOf(value));
                 case "DATE" -> statement.setDate(index, Date.valueOf(value));
-                case "TIME" -> statement.setTime(index, Time.valueOf(value));
+                case "TIME" -> statement.setTime(index, Time.valueOf(withoutFractionalSeconds(value)));
                 case "UUID" -> statement.setObject(index, UUID.fromString(value));
                 case "JSON" -> statement.setObject(index, value, Types.OTHER);
                 default -> statement.setString(index, value);
@@ -193,6 +194,17 @@ final class RdsDataSqlParameters {
                     "Parameter :" + name + " value \"" + value + "\" is not a valid "
                             + hint + " for the supplied typeHint.", 400);
         }
+    }
+
+    /**
+     * The AWS RDS Data API documents {@code TIME} as {@code HH:MM:SS[.FFF]} with
+     * optional fractional seconds, but {@link Time#valueOf(String)} only accepts
+     * {@code HH:mm:ss} and throws on a fractional part. Drop any fractional
+     * seconds so a documented-valid value is not falsely rejected.
+     */
+    private static String withoutFractionalSeconds(String value) {
+        int dot = value.indexOf('.');
+        return dot < 0 ? value : value.substring(0, dot);
     }
 
     private static byte[] blobBytes(String name, JsonNode blob) {

@@ -214,11 +214,6 @@ public class RdsDataService implements Resettable {
     private ObjectNode executeOnConnection(Connection connection, DatabaseEngine engine, String sql,
                                            Map<String, JsonNode> parameters, boolean includeMetadata)
             throws SQLException {
-        if (parameters.isEmpty()) {
-            try (Statement statement = connection.createStatement()) {
-                return buildResponse(statement, statement.execute(sql), includeMetadata);
-            }
-        }
         RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
         try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
             RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);

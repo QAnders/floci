@@ -122,6 +122,42 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void rejectsMissingParameterEvenWhenParametersOmitted() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode select = harness.request("select 1 from data_api_items where id = :id");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(select, REGION));
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains(":id"));
+    }
+
+    @Test
+    void bindsTimeTypeHintWithOptionalFractionalSeconds() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode withFraction = harness.request("select cast(:t as time) as t");
+        ArrayNode fractionParams = objectMapper.createArrayNode();
+        fractionParams.add(hintedStringParam("t", "14:30:15.123", "TIME"));
+        withFraction.set("parameters", fractionParams);
+        ObjectNode fractionResponse = harness.service.executeStatement(withFraction, REGION);
+        assertEquals("14:30:15",
+                ((ArrayNode) fractionResponse.get("records").get(0)).get(0).get("stringValue").asText());
+
+        ObjectNode withoutFraction = harness.request("select cast(:t as time) as t");
+        ArrayNode plainParams = objectMapper.createArrayNode();
+        plainParams.add(hintedStringParam("t", "09:05:07", "TIME"));
+        withoutFraction.set("parameters", plainParams);
+        ObjectNode plainResponse = harness.service.executeStatement(withoutFraction, REGION);
+        assertEquals("09:05:07",
+                ((ArrayNode) plainResponse.get("records").get(0)).get(0).get("stringValue").asText());
+    }
+
+    @Test
     void rejectsMalformedTypeHintValueWithBadRequest() throws Exception {
         TestHarness harness = new TestHarness();
         harness.createTables();
