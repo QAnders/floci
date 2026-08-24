@@ -24,7 +24,9 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -109,30 +111,24 @@ public class RdsDataService implements Resettable {
         rejectUnsupportedOptions(request);
 
         String sql = requiredText(request, "sql");
-        String resourceArn = requiredText(request, "resourceArn");
-        requiredText(request, "secretArn");
         Map<String, JsonNode> parameters = parseParameters(request);
-        String transactionId = textOrNull(request, "transactionId");
         boolean includeMetadata = request.path("includeResultMetadata").asBoolean(false);
 
         try {
-            if (transactionId != null && !transactionId.isBlank()) {
-                TransactionContext tx = transaction(transactionId);
-                synchronized (tx) {
-                    requireActiveTransaction(transactionId, tx);
-                    validateTransactionIdentity(tx, request, region);
-                    tx.refresh(transactionTtl);
-                    return executeOnConnection(tx.connection, tx.engine, sql, parameters, includeMetadata);
-                }
-            }
+            return onTargetConnection(request, region, (connection, engine) ->
+                    executeOnConnection(connection, engine, sql, parameters, includeMetadata));
+        } catch (SQLException e) {
+            throw databaseError(e);
+        }
+    }
 
-            RdsDataResourceResolver.DatabaseTarget target =
-                    resourceResolver.resolve(resourceArn, region);
-            Credentials credentials = credentials(request, target, region);
-            String database = databaseName(request, target);
-            try (Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
-                return executeOnConnection(connection, target.engine(), sql, parameters, includeMetadata);
-            }
+    public ObjectNode batchExecuteStatement(JsonNode request, String region) {
+        String sql = requiredText(request, "sql");
+        List<Map<String, JsonNode>> parameterSets = parseParameterSets(request);
+
+        try {
+            return onTargetConnection(request, region, (connection, engine) ->
+                    batchOnConnection(connection, engine, sql, parameterSets));
         } catch (SQLException e) {
             throw databaseError(e);
         }
@@ -214,14 +210,92 @@ public class RdsDataService implements Resettable {
         return response;
     }
 
+    private ObjectNode onTargetConnection(JsonNode request, String region, ConnectionWork work)
+            throws SQLException {
+        String resourceArn = requiredText(request, "resourceArn");
+        requiredText(request, "secretArn");
+        String transactionId = textOrNull(request, "transactionId");
+
+        if (transactionId != null && !transactionId.isBlank()) {
+            TransactionContext tx = transaction(transactionId);
+            synchronized (tx) {
+                requireActiveTransaction(transactionId, tx);
+                validateTransactionIdentity(tx, request, region);
+                tx.refresh(transactionTtl);
+                return work.execute(tx.connection, tx.engine);
+            }
+        }
+
+        RdsDataResourceResolver.DatabaseTarget target =
+                resourceResolver.resolve(resourceArn, region);
+        Credentials credentials = credentials(request, target, region);
+        String database = databaseName(request, target);
+        try (Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
+            return work.execute(connection, target.engine());
+        }
+    }
+
     private ObjectNode executeOnConnection(Connection connection, DatabaseEngine engine, String sql,
                                            Map<String, JsonNode> parameters, boolean includeMetadata)
             throws SQLException {
         RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
-        try (PreparedStatement statement = connection.prepareStatement(parsed.sql())) {
+        try (PreparedStatement statement = prepare(connection, engine, parsed.sql())) {
             RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
-            return buildResponse(statement, statement.execute(), includeMetadata);
+            return buildResponse(statement, statement.execute(), includeMetadata, engine);
         }
+    }
+
+    private ObjectNode batchOnConnection(Connection connection, DatabaseEngine engine, String sql,
+                                         List<Map<String, JsonNode>> parameterSets)
+            throws SQLException {
+        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
+        ArrayNode updateResults = objectMapper.createArrayNode();
+        try (PreparedStatement statement = prepare(connection, engine, parsed.sql())) {
+            if (parameterSets.isEmpty()) {
+                RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), Map.of());
+                statement.execute();
+            } else {
+                for (Map<String, JsonNode> parameters : parameterSets) {
+                    RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
+                    statement.addBatch();
+                }
+                statement.executeBatch();
+                List<ArrayNode> generatedRows = generatedKeyRows(statement, engine);
+                for (int set = 0; set < parameterSets.size(); set++) {
+                    ObjectNode updateResult = objectMapper.createObjectNode();
+                    updateResult.set("generatedFields", set < generatedRows.size()
+                            ? generatedRows.get(set)
+                            : objectMapper.createArrayNode());
+                    updateResults.add(updateResult);
+                }
+            }
+        }
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("updateResults", updateResults);
+        return response;
+    }
+
+    private static PreparedStatement prepare(Connection connection, DatabaseEngine engine, String sql)
+            throws SQLException {
+        if (returnsGeneratedKeys(engine)) {
+            return connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
+        }
+        return connection.prepareStatement(sql);
+    }
+
+    /**
+     * Whether generated keys are requested from {@code engine}. AWS reports no
+     * {@code generatedFields} for Aurora PostgreSQL — callers read generated
+     * values with a {@code RETURNING} clause instead — so they are only asked
+     * for on the engines AWS answers them for. That also avoids the PostgreSQL
+     * driver rewriting the statement with {@code RETURNING *} to satisfy
+     * {@code RETURN_GENERATED_KEYS}.
+     */
+    private static boolean returnsGeneratedKeys(DatabaseEngine engine) {
+        return switch (engine) {
+            case MYSQL, MARIADB -> true;
+            case POSTGRES -> false;
+        };
     }
 
     /**
@@ -236,14 +310,14 @@ public class RdsDataService implements Resettable {
         };
     }
 
-    private ObjectNode buildResponse(Statement statement, boolean hasResultSet, boolean includeMetadata)
-            throws SQLException {
+    private ObjectNode buildResponse(Statement statement, boolean hasResultSet, boolean includeMetadata,
+                                     DatabaseEngine engine) throws SQLException {
         ObjectNode response = objectMapper.createObjectNode();
         if (hasResultSet) {
             try (ResultSet rs = statement.getResultSet()) {
                 ResultSetMetaData meta = rs.getMetaData();
                 if (includeMetadata) {
-                    response.set("columnMetadata", columnMetadata(meta));
+                    response.set("columnMetadata", RdsDataColumnMetadata.toColumnMetadata(objectMapper, meta));
                 }
                 response.set("records", records(rs, meta));
             }
@@ -252,22 +326,43 @@ public class RdsDataService implements Resettable {
             int updateCount = statement.getUpdateCount();
             response.set("records", objectMapper.createArrayNode());
             response.put("numberOfRecordsUpdated", Math.max(updateCount, 0));
+            response.set("generatedFields", generatedFields(statement, engine));
         }
         return response;
     }
 
-    private ArrayNode columnMetadata(ResultSetMetaData meta) throws SQLException {
-        ArrayNode columns = objectMapper.createArrayNode();
-        for (int i = 1; i <= meta.getColumnCount(); i++) {
-            ObjectNode column = objectMapper.createObjectNode();
-            String name = meta.getColumnLabel(i);
-            if (name == null || name.isBlank()) {
-                name = meta.getColumnName(i);
-            }
-            column.put("name", name);
-            columns.add(column);
+    private ArrayNode generatedFields(Statement statement, DatabaseEngine engine) {
+        ArrayNode fields = objectMapper.createArrayNode();
+        for (ArrayNode row : generatedKeyRows(statement, engine)) {
+            fields.addAll(row);
         }
-        return columns;
+        return fields;
+    }
+
+    /**
+     * The generated keys of {@code statement}, one {@code Field} array per row
+     * the driver reported. A batch reports one row per parameter set; a single
+     * statement reports one row per inserted row.
+     */
+    private List<ArrayNode> generatedKeyRows(Statement statement, DatabaseEngine engine) {
+        if (!returnsGeneratedKeys(engine)) {
+            return List.of();
+        }
+        try (ResultSet keys = statement.getGeneratedKeys()) {
+            ResultSetMetaData meta = keys.getMetaData();
+            List<ArrayNode> rows = new ArrayList<>();
+            while (keys.next()) {
+                ArrayNode row = objectMapper.createArrayNode();
+                for (int i = 1; i <= meta.getColumnCount(); i++) {
+                    row.add(RdsDataFieldMapper.toField(objectMapper, keys.getObject(i), meta.getColumnType(i)));
+                }
+                rows.add(row);
+            }
+            return rows;
+        } catch (SQLException e) {
+            LOG.debugv("Could not read generated keys for RDS Data API statement: {0}", e.getMessage());
+            return List.of();
+        }
     }
 
     private ArrayNode records(ResultSet rs, ResultSetMetaData meta) throws SQLException {
@@ -422,13 +517,32 @@ public class RdsDataService implements Resettable {
     }
 
     private static Map<String, JsonNode> parseParameters(JsonNode request) {
-        JsonNode parameters = request.get("parameters");
+        return parseParameterList(request.get("parameters"), "parameters");
+    }
+
+    private static List<Map<String, JsonNode>> parseParameterSets(JsonNode request) {
+        JsonNode parameterSets = request.get("parameterSets");
+        if (parameterSets == null || parameterSets.isNull()) {
+            return List.of();
+        }
+        if (!parameterSets.isArray()) {
+            throw new AwsException("BadRequestException",
+                    "parameterSets must be an array of SqlParameter arrays.", 400);
+        }
+        List<Map<String, JsonNode>> sets = new ArrayList<>();
+        for (JsonNode parameters : parameterSets) {
+            sets.add(parseParameterList(parameters, "each entry in parameterSets"));
+        }
+        return sets;
+    }
+
+    private static Map<String, JsonNode> parseParameterList(JsonNode parameters, String field) {
         if (parameters == null || parameters.isNull()) {
             return Map.of();
         }
         if (!parameters.isArray()) {
             throw new AwsException("BadRequestException",
-                    "parameters must be an array of SqlParameter values.", 400);
+                    field + " must be an array of SqlParameter values.", 400);
         }
         Map<String, JsonNode> byName = new LinkedHashMap<>();
         for (JsonNode parameter : parameters) {
@@ -514,5 +628,10 @@ public class RdsDataService implements Resettable {
     }
 
     private record Credentials(String username, String password) {
+    }
+
+    @FunctionalInterface
+    private interface ConnectionWork {
+        ObjectNode execute(Connection connection, DatabaseEngine engine) throws SQLException;
     }
 }

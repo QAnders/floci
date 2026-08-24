@@ -24,8 +24,9 @@ For the upstream API shape, see the AWS RDS Data API documentation:
 | `BeginTransaction` | `POST /BeginTransaction` | `resourceArn`, `secretArn` | Open a JDBC transaction and return a transaction ID |
 | `CommitTransaction` | `POST /CommitTransaction` | `resourceArn`, `secretArn`, `transactionId` | Commit an open transaction |
 | `RollbackTransaction` | `POST /RollbackTransaction` | `resourceArn`, `secretArn`, `transactionId` | Roll back an open transaction |
+| `BatchExecuteStatement` | `POST /BatchExecute` | `resourceArn`, `secretArn`, `sql` | Run one SQL statement once per entry in `parameterSets` |
 
-`BatchExecuteStatement` is recognized at `POST /BatchExecute` and returns an AWS-style `BadRequestException` because batch execution is not implemented yet. The deprecated `ExecuteSql` operation is also recognized at `POST /ExecuteSql` and returns an AWS-style `BadRequestException`.
+The deprecated `ExecuteSql` operation is recognized at `POST /ExecuteSql` and returns an AWS-style `BadRequestException`.
 
 ## Compatibility Notes
 
@@ -35,9 +36,12 @@ For the upstream API shape, see the AWS RDS Data API documentation:
 - MySQL, MariaDB, and PostgreSQL resources are supported. Aurora PostgreSQL resources resolve to the same PostgreSQL execution path.
 - SQL is sent directly to the local database engine through JDBC. `SqlParameter` binding is supported for all engines: named `:placeholder` markers are rewritten to positional JDBC bind parameters and executed through a `PreparedStatement`. Colons inside string literals, quoted/backtick identifiers, comments, PostgreSQL `::` casts, and PostgreSQL dollar-quoted strings are left untouched. A placeholder used more than once binds its value at each position. Supported value variants are `stringValue`, `booleanValue`, `longValue`, `doubleValue`, `blobValue`, and `isNull`; `typeHint` values `DECIMAL`, `TIMESTAMP`, `DATE`, `TIME`, `UUID`, and `JSON` are honored. `arrayValue` parameters are not supported yet and return `BadRequestException`, as do malformed `parameters` payloads (not a JSON array, or an entry missing `name`).
 - Result records include Data API field variants such as `stringValue`, `longValue`, `blobValue`, `booleanValue`, `doubleValue`, and `isNull`.
+- `includeResultMetadata` returns the full AWS `ColumnMetadata` shape per column: `label`, `name`, `type`, `typeName`, `tableName`, `schemaName`, `nullable`, `precision`, `scale`, `isSigned`, `isCaseSensitive`, `isCurrency`, `isAutoIncrement`, and `arrayBaseColumnType`. `label` is the result-set label (the alias when the query aliases a column) and `name` is the underlying column name, falling back to the label for computed columns — clients that hydrate rows by `label` need it present. `type` is a JDBC type code and `typeName` is the engine's own type name (for example `4` and `int4` for a PostgreSQL integer), both taken from the driver so they match the engine actually serving the query. `arrayBaseColumnType` is always `0` because array columns are not mapped to `arrayValue` fields yet.
+- `ExecuteStatement` returns `generatedFields` for statements that report an update count on MySQL and MariaDB, carrying the auto-increment keys the engine generated. As on Aurora PostgreSQL, PostgreSQL resources always return an empty list — use a `RETURNING` clause to read generated values. `generatedFields` is omitted for statements that return a result set.
+- `BatchExecuteStatement` runs the statement once per entry in `parameterSets` through a JDBC batch and returns one `updateResults` entry per set, each carrying that set's `generatedFields` under the same engine rules as `ExecuteStatement`. It accepts `transactionId`, so a batch can take part in a Data API transaction; without one the batch commits automatically. When `parameterSets` is absent or empty the statement runs once and `updateResults` is empty. A batched `SELECT` is rejected by the database driver and surfaces as `DatabaseErrorException`, matching the AWS restriction that batch execution does not return result sets.
 - SQL errors are returned as `DatabaseErrorException` so AWS SDK callers can handle database failures with normal AWS error decoding.
 - If `secretArn` points to a local Secrets Manager secret with JSON credentials (`username` or `user`, plus `password`), those credentials are used. If the secret is missing or cannot be parsed, Floci falls back to the resolved RDS resource's master credentials for local development convenience.
-- `formatRecordsAs=JSON`, `formattedRecords`, `generatedFields`, and `resultSetOptions` are not implemented yet. Requests that require those unsupported result modes return `BadRequestException`.
+- `formatRecordsAs=JSON`, `formattedRecords`, and `resultSetOptions` are not implemented yet. Requests that require those unsupported result modes return `BadRequestException`.
 - RDS `HttpEndpointEnabled` control-plane gating is not modeled locally; availability is controlled by `FLOCI_SERVICES_RDS_DATA_ENABLED` and whether the target local RDS resource is running.
 
 ## Configuration
@@ -81,5 +85,16 @@ aws rds-data execute-statement \
   --database app \
   --sql "select 1 as count" \
   --include-result-metadata \
+  --endpoint-url "$AWS_ENDPOINT_URL"
+
+aws rds-data batch-execute-statement \
+  --resource-arn "$RESOURCE_ARN" \
+  --secret-arn "$SECRET_ARN" \
+  --database app \
+  --sql "insert into items (id, title) values (:id, :title)" \
+  --parameter-sets '[
+    [{"name":"id","value":{"longValue":1}},{"name":"title","value":{"stringValue":"first"}}],
+    [{"name":"id","value":{"longValue":2}},{"name":"title","value":{"stringValue":"second"}}]
+  ]' \
   --endpoint-url "$AWS_ENDPOINT_URL"
 ```
