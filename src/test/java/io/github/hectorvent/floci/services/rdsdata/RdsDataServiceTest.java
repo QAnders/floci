@@ -147,6 +147,35 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void batchExecuteStatementKeepsGeneratedKeysWithTheirParameterSet() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode batch = harness.request(
+                "insert into data_api_events(name) values (:first), (:second)");
+        ArrayNode sets = objectMapper.createArrayNode();
+        sets.add(objectMapper.createArrayNode()
+                .add(stringParam("first", "one-a"))
+                .add(stringParam("second", "one-b")));
+        sets.add(objectMapper.createArrayNode()
+                .add(stringParam("first", "two-a"))
+                .add(stringParam("second", "two-b")));
+        batch.set("parameterSets", sets);
+
+        ObjectNode response = harness.service.batchExecuteStatement(batch, REGION);
+
+        ArrayNode updateResults = (ArrayNode) response.get("updateResults");
+        assertEquals(2, updateResults.size());
+        ArrayNode firstKeys = (ArrayNode) updateResults.get(0).get("generatedFields");
+        ArrayNode secondKeys = (ArrayNode) updateResults.get(1).get("generatedFields");
+        assertEquals(2, firstKeys.size());
+        assertEquals(2, secondKeys.size());
+        assertTrue(secondKeys.get(0).get("longValue").asLong()
+                > firstKeys.get(1).get("longValue").asLong());
+        assertEquals(4L, harness.countEvents());
+    }
+
+    @Test
     void batchExecuteStatementHonorsAnOpenTransaction() throws Exception {
         TestHarness harness = new TestHarness();
         harness.createTables();
@@ -161,6 +190,22 @@ class RdsDataServiceTest {
         harness.service.rollbackTransaction(harness.transactionRequest(transactionId), REGION);
 
         assertEquals(0L, harness.countEvents());
+    }
+
+    @Test
+    void batchExecuteStatementIgnoresExecuteStatementOnlyResultOptions() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode batch = harness.request("insert into data_api_events(name) values (:name)");
+        batch.set("parameterSets", parameterSets("ignored-options"));
+        batch.put("formatRecordsAs", "JSON");
+        batch.set("resultSetOptions", objectMapper.createObjectNode().put("decimalReturnType", "STRING"));
+
+        ObjectNode response = harness.service.batchExecuteStatement(batch, REGION);
+
+        assertEquals(1, response.get("updateResults").size());
+        assertEquals(1L, harness.countEvents());
     }
 
     @Test
