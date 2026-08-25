@@ -370,6 +370,36 @@ func TestRdsDataApiGoSdkV1(t *testing.T) {
 	assert.Equal(t, int64(2), awsV1.Int64Value(batchCountOut.Records[0][0].LongValue))
 
 	_, err = dataSvc.BatchExecuteStatement(&rdsdataservice.BatchExecuteStatementInput{
+		ResourceArn: awsV1.String(resourceArn),
+		SecretArn:   awsV1.String(secretArn),
+		Database:    awsV1.String(database),
+		Sql:         awsV1.String("select id from data_api_items where score = :score"),
+		ParameterSets: [][]*rdsdataservice.SqlParameter{
+			{{Name: awsV1.String("score"), Value: &rdsdataservice.Field{LongValue: awsV1.Int64(1)}}},
+			{{Name: awsV1.String("score"), Value: &rdsdataservice.Field{LongValue: awsV1.Int64(2)}}},
+		},
+	})
+	assertAwsErrorCode(t, err, "BadRequestException")
+
+	noSetsOut, err := dataSvc.BatchExecuteStatement(&rdsdataservice.BatchExecuteStatementInput{
+		ResourceArn: awsV1.String(resourceArn),
+		SecretArn:   awsV1.String(secretArn),
+		Database:    awsV1.String(database),
+		Sql:         awsV1.String("insert into data_api_items (id, title, score) values ('batch-no-sets', 'no sets', 99)"),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, noSetsOut.UpdateResults)
+
+	noSetsCountOut, err := dataSvc.ExecuteStatement(&rdsdataservice.ExecuteStatementInput{
+		ResourceArn: awsV1.String(resourceArn),
+		SecretArn:   awsV1.String(secretArn),
+		Database:    awsV1.String(database),
+		Sql:         awsV1.String("select count(*) as count from data_api_items where id = 'batch-no-sets'"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), awsV1.Int64Value(noSetsCountOut.Records[0][0].LongValue))
+
+	_, err = dataSvc.BatchExecuteStatement(&rdsdataservice.BatchExecuteStatementInput{
 		ResourceArn:   awsV1.String(resourceArn),
 		SecretArn:     awsV1.String(secretArn),
 		Database:      awsV1.String(database),
@@ -780,6 +810,36 @@ func TestRdsDataApiGoSdkPostgresV1(t *testing.T) {
 	assert.Equal(t, int64(2), awsV1.Int64Value(batchCountOut.Records[0][0].LongValue))
 
 	_, err = dataSvc.BatchExecuteStatement(&rdsdataservice.BatchExecuteStatementInput{
+		ResourceArn: awsV1.String(resourceArn),
+		SecretArn:   awsV1.String(secretArn),
+		Database:    awsV1.String(database),
+		Sql:         awsV1.String("select id from data_api_items where score = :score"),
+		ParameterSets: [][]*rdsdataservice.SqlParameter{
+			{{Name: awsV1.String("score"), Value: &rdsdataservice.Field{LongValue: awsV1.Int64(1)}}},
+			{{Name: awsV1.String("score"), Value: &rdsdataservice.Field{LongValue: awsV1.Int64(2)}}},
+		},
+	})
+	assertAwsErrorCode(t, err, "BadRequestException")
+
+	noSetsOut, err := dataSvc.BatchExecuteStatement(&rdsdataservice.BatchExecuteStatementInput{
+		ResourceArn: awsV1.String(resourceArn),
+		SecretArn:   awsV1.String(secretArn),
+		Database:    awsV1.String(database),
+		Sql:         awsV1.String("insert into data_api_items (id, title, score) values ('batch-no-sets', 'no sets', 99)"),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, noSetsOut.UpdateResults)
+
+	noSetsCountOut, err := dataSvc.ExecuteStatement(&rdsdataservice.ExecuteStatementInput{
+		ResourceArn: awsV1.String(resourceArn),
+		SecretArn:   awsV1.String(secretArn),
+		Database:    awsV1.String(database),
+		Sql:         awsV1.String("select count(*) as count from data_api_items where id = 'batch-no-sets'"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), awsV1.Int64Value(noSetsCountOut.Records[0][0].LongValue))
+
+	_, err = dataSvc.BatchExecuteStatement(&rdsdataservice.BatchExecuteStatementInput{
 		ResourceArn:   awsV1.String(resourceArn),
 		SecretArn:     awsV1.String(secretArn),
 		Database:      awsV1.String(database),
@@ -1057,6 +1117,36 @@ func TestRdsDataApiGoSdkV2(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), fieldLongValue(t, batchCountOut.Records[0][0]))
 
+	_, err = dataSvc.BatchExecuteStatement(ctx, &rdsdata.BatchExecuteStatementInput{
+		ResourceArn: awsV2.String(resourceArn),
+		SecretArn:   awsV2.String(secretArn),
+		Database:    awsV2.String(database),
+		Sql:         awsV2.String("select id from data_api_v2_items where qty = :qty"),
+		ParameterSets: [][]rdsdatatypes.SqlParameter{
+			{{Name: awsV2.String("qty"), Value: &rdsdatatypes.FieldMemberLongValue{Value: 1}}},
+			{{Name: awsV2.String("qty"), Value: &rdsdatatypes.FieldMemberLongValue{Value: 2}}},
+		},
+	})
+	assertSmithyErrorCode(t, err, "BadRequestException")
+
+	noSetsOut, err := dataSvc.BatchExecuteStatement(ctx, &rdsdata.BatchExecuteStatementInput{
+		ResourceArn: awsV2.String(resourceArn),
+		SecretArn:   awsV2.String(secretArn),
+		Database:    awsV2.String(database),
+		Sql:         awsV2.String("insert into data_api_v2_items (id, name, qty) values ('v2-batch-no-sets', 'no sets', 99)"),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, noSetsOut.UpdateResults)
+
+	noSetsCountOut, err := dataSvc.ExecuteStatement(ctx, &rdsdata.ExecuteStatementInput{
+		ResourceArn: awsV2.String(resourceArn),
+		SecretArn:   awsV2.String(secretArn),
+		Database:    awsV2.String(database),
+		Sql:         awsV2.String("select count(*) as count from data_api_v2_items where id = 'v2-batch-no-sets'"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), fieldLongValue(t, noSetsCountOut.Records[0][0]))
+
 	_, err = dataSvc.ExecuteSql(ctx, &rdsdata.ExecuteSqlInput{
 		DbClusterOrInstanceArn: awsV2.String(resourceArn),
 		AwsSecretStoreArn:      awsV2.String(secretArn),
@@ -1279,6 +1369,36 @@ func TestRdsDataApiGoSdkPostgresV2(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), fieldLongValue(t, batchCountOut.Records[0][0]))
+
+	_, err = dataSvc.BatchExecuteStatement(ctx, &rdsdata.BatchExecuteStatementInput{
+		ResourceArn: awsV2.String(resourceArn),
+		SecretArn:   awsV2.String(secretArn),
+		Database:    awsV2.String(database),
+		Sql:         awsV2.String("select id from data_api_v2_items where qty = :qty"),
+		ParameterSets: [][]rdsdatatypes.SqlParameter{
+			{{Name: awsV2.String("qty"), Value: &rdsdatatypes.FieldMemberLongValue{Value: 1}}},
+			{{Name: awsV2.String("qty"), Value: &rdsdatatypes.FieldMemberLongValue{Value: 2}}},
+		},
+	})
+	assertSmithyErrorCode(t, err, "BadRequestException")
+
+	noSetsOut, err := dataSvc.BatchExecuteStatement(ctx, &rdsdata.BatchExecuteStatementInput{
+		ResourceArn: awsV2.String(resourceArn),
+		SecretArn:   awsV2.String(secretArn),
+		Database:    awsV2.String(database),
+		Sql:         awsV2.String("insert into data_api_v2_items (id, name, qty) values ('v2-batch-no-sets', 'no sets', 99)"),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, noSetsOut.UpdateResults)
+
+	noSetsCountOut, err := dataSvc.ExecuteStatement(ctx, &rdsdata.ExecuteStatementInput{
+		ResourceArn: awsV2.String(resourceArn),
+		SecretArn:   awsV2.String(secretArn),
+		Database:    awsV2.String(database),
+		Sql:         awsV2.String("select count(*) as count from data_api_v2_items where id = 'v2-batch-no-sets'"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), fieldLongValue(t, noSetsCountOut.Records[0][0]))
 
 	_, err = dataSvc.ExecuteSql(ctx, &rdsdata.ExecuteSqlInput{
 		DbClusterOrInstanceArn: awsV2.String(resourceArn),

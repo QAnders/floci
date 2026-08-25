@@ -209,6 +209,102 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void batchExecuteStatementRunsNothingWithoutParameterSets() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode absent = harness.request("insert into data_api_events(name) values ('no-sets')");
+        ObjectNode absentResponse = harness.service.batchExecuteStatement(absent, REGION);
+
+        ObjectNode empty = harness.request("insert into data_api_events(name) values ('no-sets')");
+        empty.set("parameterSets", objectMapper.createArrayNode());
+        ObjectNode emptyResponse = harness.service.batchExecuteStatement(empty, REGION);
+
+        assertEquals(0, absentResponse.get("updateResults").size());
+        assertEquals(0, emptyResponse.get("updateResults").size());
+        assertEquals(0L, harness.countEvents());
+    }
+
+    @Test
+    void batchExecuteStatementRunsOnceForOneEmptyParameterSet() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode batch = harness.request("insert into data_api_events(name) values ('empty-set')");
+        batch.set("parameterSets", objectMapper.createArrayNode().add(objectMapper.createArrayNode()));
+
+        ObjectNode response = harness.service.batchExecuteStatement(batch, REGION);
+
+        assertEquals(1, response.get("updateResults").size());
+        assertEquals(1L, harness.countEvents());
+    }
+
+    @Test
+    void batchExecuteStatementRejectsAStatementThatReturnsRows() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+        harness.service.executeStatement(
+                harness.request("insert into data_api_events(name) values ('kept')"), REGION);
+
+        ObjectNode select = harness.request("select id from data_api_events where name = :name");
+        select.set("parameterSets", parameterSets("kept", "kept"));
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.batchExecuteStatement(select, REGION));
+
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("returns a result set"));
+        assertEquals(1L, harness.countEvents());
+    }
+
+    @Test
+    void batchExecuteStatementRunsDmlHiddenBehindALeadingComment() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode batch = harness.request("""
+                -- seeds the events table
+                /* two sets */ insert into data_api_events(name) values (:name)
+                """);
+        batch.set("parameterSets", parameterSets("commented-one", "commented-two"));
+
+        ObjectNode response = harness.service.batchExecuteStatement(batch, REGION);
+
+        assertEquals(2, response.get("updateResults").size());
+        assertEquals(2L, harness.countEvents());
+    }
+
+    @Test
+    void batchExecuteStatementReportsOneResultPerSetOnPostgres() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        harness.createEventsTable();
+
+        ObjectNode batch = harness.request("insert into data_api_events(name) values (:name)");
+        batch.set("parameterSets", parameterSets("first", "second"));
+
+        ObjectNode response = harness.service.batchExecuteStatement(batch, REGION);
+
+        ArrayNode updateResults = (ArrayNode) response.get("updateResults");
+        assertEquals(2, updateResults.size());
+        assertEquals(0, updateResults.get(0).get("generatedFields").size());
+        assertEquals(0, updateResults.get(1).get("generatedFields").size());
+        assertEquals(2L, harness.countEvents());
+    }
+
+    @Test
+    void batchExecuteStatementRejectsAStatementThatReturnsRowsOnPostgres() throws Exception {
+        TestHarness harness = new TestHarness(DatabaseEngine.POSTGRES);
+        harness.createEventsTable();
+
+        ObjectNode select = harness.request("select id from data_api_events where name = :name");
+        select.set("parameterSets", parameterSets("first", "second"));
+        AwsException error = assertThrows(AwsException.class,
+                () -> harness.service.batchExecuteStatement(select, REGION));
+
+        assertEquals("BadRequestException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("returns a result set"));
+    }
+
+    @Test
     void batchExecuteStatementValidatesRequestShape() throws Exception {
         TestHarness harness = new TestHarness();
         harness.createTables();
@@ -655,8 +751,20 @@ class RdsDataServiceTest {
     }
 
     private static RdsDataResourceResolver.DatabaseTarget target(String resourceArn) {
-        return new RdsDataResourceResolver.DatabaseTarget(resourceArn, DatabaseEngine.MYSQL,
+        return target(resourceArn, DatabaseEngine.MYSQL);
+    }
+
+    private static RdsDataResourceResolver.DatabaseTarget target(String resourceArn, DatabaseEngine engine) {
+        return new RdsDataResourceResolver.DatabaseTarget(resourceArn, engine,
                 "127.0.0.1", 3306, "sa", "", "app");
+    }
+
+    /** The H2 compatibility mode standing in for {@code engine}. */
+    private static String h2Mode(DatabaseEngine engine) {
+        return switch (engine) {
+            case MYSQL, MARIADB -> "MySQL";
+            case POSTGRES -> "PostgreSQL";
+        };
     }
 
     private static Connection throwingSetAutoCommitConnection(AtomicBoolean closed) {
@@ -688,20 +796,29 @@ class RdsDataServiceTest {
     }
 
     private final class TestHarness {
-        private final String jdbcUrl = "jdbc:h2:mem:rdsdata_" + UUID.randomUUID()
-                + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
+        private final String jdbcUrl;
         private final RdsDataResourceResolver resolver;
         private final RdsDataResourceResolver.DatabaseTarget target;
         private final RdsDataService service;
 
         private TestHarness() {
-            this(Duration.ofSeconds(60));
+            this(DatabaseEngine.MYSQL, Duration.ofSeconds(60));
+        }
+
+        private TestHarness(DatabaseEngine engine) {
+            this(engine, Duration.ofSeconds(60));
         }
 
         private TestHarness(Duration transactionTtl) {
+            this(DatabaseEngine.MYSQL, transactionTtl);
+        }
+
+        private TestHarness(DatabaseEngine engine, Duration transactionTtl) {
+            jdbcUrl = "jdbc:h2:mem:rdsdata_" + UUID.randomUUID() + ";MODE=" + h2Mode(engine)
+                    + ";DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
             resolver = mock(RdsDataResourceResolver.class);
             SecretsManagerService secrets = fallbackSecrets();
-            target = target();
+            target = target(RESOURCE_ARN, engine);
             when(resolver.resolve(RESOURCE_ARN, REGION)).thenReturn(target);
             when(resolver.resolve(FALLBACK_RESOURCE_ARN, REGION)).thenReturn(target);
             when(resolver.resolve(OTHER_RESOURCE_ARN, REGION)).thenReturn(target(OTHER_RESOURCE_ARN));
@@ -735,6 +852,22 @@ class RdsDataServiceTest {
                 statement.execute("""
                         create table data_api_events(
                             id bigint auto_increment primary key,
+                            name varchar(64)
+                        )
+                        """);
+            }
+        }
+
+        /**
+         * The events table alone, in DDL both H2 compatibility modes accept, for
+         * harnesses standing in for PostgreSQL.
+         */
+        private void createEventsTable() throws SQLException {
+            try (Connection connection = DriverManager.getConnection(jdbcUrl, "sa", "");
+                 Statement statement = connection.createStatement()) {
+                statement.execute("""
+                        create table data_api_events(
+                            id bigint generated by default as identity primary key,
                             name varchar(64)
                         )
                         """);

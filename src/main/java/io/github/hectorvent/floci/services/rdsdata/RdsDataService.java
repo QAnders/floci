@@ -27,7 +27,9 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -39,6 +41,9 @@ import java.util.concurrent.TimeUnit;
 public class RdsDataService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsDataService.class);
+
+    /** Statement keywords whose result is a write, even when a {@code RETURNING} clause also reports rows. */
+    private static final Set<String> DML_KEYWORDS = Set.of("insert", "update", "delete", "merge", "replace");
 
     private final RdsDataResourceResolver resourceResolver;
     private final SecretsManagerService secretsManagerService;
@@ -249,6 +254,12 @@ public class RdsDataService implements Resettable {
      * Runs {@code sql} once per parameter set and reports one
      * {@code updateResults} entry per set.
      *
+     * <p>No parameter sets runs nothing. AWS executes the statement "as many
+     * times as the number of parameter sets provided" and points a caller who
+     * wants a single parameterless execution at one empty set ({@code [[]]}) or
+     * at {@code ExecuteStatement}, so an absent or empty {@code parameterSets}
+     * must not reach the database.
+     *
      * <p>Engines that report generated keys execute a set at a time so each
      * entry carries the keys that set produced: {@code getGeneratedKeys()}
      * after {@code executeBatch()} flattens every row the whole batch generated
@@ -259,13 +270,14 @@ public class RdsDataService implements Resettable {
     private ObjectNode batchOnConnection(Connection connection, DatabaseEngine engine, String sql,
                                          List<Map<String, JsonNode>> parameterSets)
             throws SQLException {
-        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
         ArrayNode updateResults = objectMapper.createArrayNode();
+        if (parameterSets.isEmpty()) {
+            return batchResponse(updateResults);
+        }
+        RdsDataSqlParameters.ParsedSql parsed = RdsDataSqlParameters.parse(sql, usesBackslashEscapes(engine));
         try (PreparedStatement statement = prepare(connection, engine, parsed.sql())) {
-            if (parameterSets.isEmpty()) {
-                RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), Map.of());
-                statement.execute();
-            } else if (returnsGeneratedKeys(engine)) {
+            rejectStatementReturningRows(statement, parsed.sql());
+            if (returnsGeneratedKeys(engine)) {
                 for (Map<String, JsonNode> parameters : parameterSets) {
                     RdsDataSqlParameters.bind(statement, parsed.parameterOrder(), parameters);
                     statement.execute();
@@ -282,9 +294,79 @@ public class RdsDataService implements Resettable {
                 }
             }
         }
+        return batchResponse(updateResults);
+    }
+
+    private ObjectNode batchResponse(ArrayNode updateResults) {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("updateResults", updateResults);
         return response;
+    }
+
+    /**
+     * Rejects a batched statement whose result is rows rather than an update
+     * count. AWS takes "a DML statement" here and answers with one
+     * {@code UpdateResult} per set, which has nowhere to carry a result set.
+     * Neither engine refuses one on its own: the MySQL branch of
+     * {@link #batchOnConnection} executes each set through {@code execute()} to
+     * keep generated keys with their set, which bypasses the
+     * {@code executeBatch()} that Connector/J would have refused, and the
+     * PostgreSQL driver batches a {@code SELECT} happily.
+     *
+     * <p>The check reads the driver's description of the prepared statement,
+     * which both drivers answer without running it. A DML statement that also
+     * reports rows through a {@code RETURNING} clause is left alone — AWS points
+     * Aurora PostgreSQL callers at {@code RETURNING} because
+     * {@code generatedFields} is always empty there — so the leading keyword
+     * decides that before the description is asked for.
+     */
+    private static void rejectStatementReturningRows(PreparedStatement statement, String sql) {
+        if (isDataModifying(sql) || !returnsRows(statement)) {
+            return;
+        }
+        throw new AwsException("BadRequestException",
+                "BatchExecuteStatement does not support a SQL statement that returns a result set. "
+                        + "Use ExecuteStatement instead.", 400);
+    }
+
+    private static boolean returnsRows(PreparedStatement statement) {
+        try {
+            return statement.getMetaData() != null;
+        } catch (SQLException e) {
+            // A driver that cannot describe the statement leaves the verdict to the execution itself.
+            LOG.debugv("Could not describe RDS Data API batch statement: {0}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Whether {@code sql} opens a data-modifying statement, ignoring leading
+     * whitespace and comments. Only used to exempt DML from
+     * {@link #rejectStatementReturningRows}, so an unrecognized leading keyword
+     * counts as not modifying and the driver's description decides.
+     */
+    private static boolean isDataModifying(String sql) {
+        int len = sql.length();
+        int i = 0;
+        while (i < len) {
+            char c = sql.charAt(i);
+            if (Character.isWhitespace(c)) {
+                i++;
+            } else if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
+                int end = sql.indexOf('\n', i);
+                i = end < 0 ? len : end + 1;
+            } else if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
+                int end = sql.indexOf("*/", i + 2);
+                i = end < 0 ? len : end + 2;
+            } else {
+                break;
+            }
+        }
+        int start = i;
+        while (i < len && Character.isLetter(sql.charAt(i))) {
+            i++;
+        }
+        return DML_KEYWORDS.contains(sql.substring(start, i).toLowerCase(Locale.ROOT));
     }
 
     private ObjectNode updateResult(ArrayNode generatedFields) {
