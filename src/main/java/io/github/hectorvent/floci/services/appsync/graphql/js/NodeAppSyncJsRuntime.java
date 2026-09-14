@@ -119,6 +119,7 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
         body.put("code", code);
         body.put("handler", handler);
         body.put("context", context);
+        body.put("enforceSubset", jsRuntimeConfig().enforceAppsyncSubset());
         JsonNode response = post("/evaluate", body);
         return toEvaluation(response);
     }
@@ -375,9 +376,24 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
         }
     }
 
+    /**
+     * Drops every handle to the sidecar this instance was using. The container id and the log
+     * follower go too: keeping them meant a later shutdown could stop and remove a container this
+     * runtime no longer considered its own, and the follower was never closed on the failure path.
+     */
     private void reset() {
         this.started = false;
         this.baseUrl = null;
+        this.containerId = null;
+        Closeable stream = this.logStream;
+        this.logStream = null;
+        if (stream != null) {
+            try {
+                stream.close();
+            } catch (IOException e) {
+                LOG.debugv("Could not close the AppSync JS runtime log stream: {0}", e.getMessage());
+            }
+        }
     }
 
     private EmulatorConfig.JsRuntimeConfig jsRuntimeConfig() {
