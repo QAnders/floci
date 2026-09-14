@@ -246,17 +246,44 @@ and reused for every evaluation after it. Floci's published image is a Mandrel n
 which carries no Truffle languages, so there is no in-process JavaScript to embed; running real Node
 also means a bundle executes as written, ES modules and all.
 
+Node is the engine, but **the APPSYNC_JS subset is enforced before evaluation**. AWS runs resolvers
+on a restricted runtime, not Node, so code using Node-only capabilities would run locally and be
+rejected on deploy. Accepting it here would mean local runs green-light resolvers that cannot ship,
+which is the one failure an emulator must not have.
+
 `@aws-appsync/utils` and `@aws-appsync/utils/rds` resolve to a shim the sidecar writes at boot, not
 the published package, so a resolver call never depends on npm being reachable. Covered:
 `util.error` / `appendError` / `unauthorized`, `util.autoId`, `util.time.*`, `util.dynamodb.*`,
 `util.parseJson` / `toJson` and the type predicates, `runtime.earlyReturn`, `extensions.*` (accepted,
 no-ops), and from `/rds`: `toJsonObject`, `sql`, `select`, `insert`, `update`, `remove`,
 `createPgStatement` and `typeHint`. Anything outside that set throws by name rather than answering
-`undefined`, so a gap is visible instead of silent.
+`undefined`, so a gap is visible instead of silent. `@aws-appsync/utils/dynamodb` covers `get`,
+`put` and `remove`; `update`, `scan`, `query`, `sync` and `operations` compile a condition or update
+expression and are not implemented, so they throw by name.
+
+### What is rejected
+
+| Construct | Why |
+|---|---|
+| `async` functions, `await`, promises | AWS's runtime has no async support at all |
+| `import` of anything but `@aws-appsync/utils[/rds\|/dynamodb]` | resolvers have no filesystem or network access |
+| `class`, `while`, `do...while`, generators, `yield` | not available in APPSYNC_JS |
+| `try` / `catch` / `finally`, `throw` | not available; use `util.error` |
+| `this`, `with`, `eval`, `debugger`, `require` | not available |
+
+An `async` handler is caught before it runs, a handler returning a promise is caught after, and
+imports are blocked by a module resolve hook, so a dynamic `import()` cannot slip past the source
+scan. The scan blanks comments, strings and template text first, so the same keywords inside them
+are not flagged. Recursion is also unavailable on AWS and is not detected, since that cannot be
+determined lexically.
+
+A rejected resolver fails its field with `errorType: UnsupportedFeature` and the line number, rather
+than running.
 
 | Setting | Env | Default |
 |---|---|---|
 | `floci.services.appsync.js-runtime.enabled` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_ENABLED` | `true` |
+| `floci.services.appsync.js-runtime.enforce-appsync-subset` | … `_ENFORCE_APPSYNC_SUBSET` | `true` |
 | `floci.services.appsync.js-runtime.image` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_IMAGE` | `node:22-alpine` |
 | `floci.services.appsync.js-runtime.container-name` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_CONTAINER_NAME` | `appsync-js-runtime` |
 | `floci.services.appsync.js-runtime.port` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_PORT` | `0` (Docker picks) |
