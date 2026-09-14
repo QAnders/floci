@@ -2176,6 +2176,19 @@ public interface EmulatorConfig {
         int evaluationTimeoutSeconds();
 
         /**
+         * Rejects resolver code that uses JavaScript the APPSYNC_JS runtime does not have, before
+         * evaluating it. Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_ENFORCE_APPSYNC_SUBSET}
+         *
+         * <p>On by default, because the sidecar is real Node and would otherwise accept async
+         * functions, promises, classes, try/catch, while loops and Node builtin imports, none of
+         * which AWS accepts. Running code locally that cannot deploy is the one failure an emulator
+         * must not have. Turn it off only if Floci rejects something AWS accepts, and please report
+         * it.
+         */
+        @WithDefault("true")
+        boolean enforceAppsyncSubset();
+
+        /**
          * Keeps the sidecar running when Floci stops, so the next start reuses it and skips the
          * Node boot. Off by default: a stopped Floci leaving containers behind is surprising.
          */

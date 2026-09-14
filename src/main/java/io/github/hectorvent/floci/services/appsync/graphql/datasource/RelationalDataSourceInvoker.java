@@ -14,8 +14,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * The {@code RELATIONAL_DATABASE} data source: runs the resolver's statements over the RDS Data API
@@ -186,6 +188,18 @@ public class RelationalDataSourceInvoker implements AppSyncDataSourceInvoker {
     }
 
     private ArrayNode parameterNodes(List<Parameter> parameters) {
+        // The Data API rejects a duplicate parameter name, and silently dropping one would change
+        // which value a placeholder binds to. This only arises when a resolver's variableMap names
+        // a placeholder that collides with the positional paramN the helpers generate, so say which
+        // one collided rather than letting the database report it.
+        Set<String> seen = new HashSet<>();
+        for (Parameter parameter : parameters) {
+            if (!seen.add(parameter.name())) {
+                throw new AwsException("InternalFailureException",
+                        "The resolver bound two SQL parameters named :" + parameter.name()
+                                + "; a variableMap key cannot reuse a generated positional name", 400);
+            }
+        }
         ArrayNode nodes = objectMapper.createArrayNode();
         for (Parameter parameter : parameters) {
             ObjectNode node = objectMapper.createObjectNode();

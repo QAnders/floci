@@ -9,10 +9,12 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
@@ -42,6 +44,10 @@ class AppSyncJsResolverDockerIntegrationTest {
               ping: String
               failing: String
               warned: String
+              asyncResolver: String
+              importsNode: String
+              loops: String
+              keywordsInText: String
             }
             """;
 
@@ -104,6 +110,50 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
+    /** Valid on Node, rejected by AWS: the runtime has no async support. */
+    private static final String ASYNC_RESOLVER = """
+            export async function request(ctx) {
+              return { payload: { value: "nope" } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    /** APPSYNC_JS resolvers have no filesystem or network access. */
+    private static final String NODE_IMPORT_RESOLVER = """
+            import fs from "node:fs";
+            export function request(ctx) {
+              return { payload: { value: fs.readdirSync("/").length } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String WHILE_RESOLVER = """
+            export function request(ctx) {
+              let i = 0;
+              while (i < 3) { i = i + 1; }
+              return { payload: { value: String(i) } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    /** The same keywords, but only inside a string, a comment and a template: still valid. */
+    private static final String KEYWORDS_IN_TEXT_RESOLVER = """
+            export function request(ctx) {
+              // class while try throw async await this
+              const whileActive = "try catch class while";
+              return { payload: { value: `${whileActive} ok` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
     private String apiId;
     private String apiKey;
 
@@ -118,7 +168,13 @@ class AppSyncJsResolverDockerIntegrationTest {
         try {
             Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
                     .redirectErrorStream(true).start();
-            return process.waitFor() == 0;
+            // Bounded: an unresponsive daemon would otherwise hang the probe, and with it CI,
+            // instead of the suite simply skipping.
+            if (!process.waitFor(10, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                return false;
+            }
+            return process.exitValue() == 0;
         } catch (Exception e) {
             return false;
         }
@@ -137,6 +193,10 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "ping", "local", UNIT_RESOLVER);
         createUnitResolver(apiId, "Query", "failing", "local", FAILING_RESOLVER);
         createUnitResolver(apiId, "Query", "warned", "local", WARNING_RESOLVER);
+        createUnitResolver(apiId, "Query", "asyncResolver", "local", ASYNC_RESOLVER);
+        createUnitResolver(apiId, "Query", "importsNode", "local", NODE_IMPORT_RESOLVER);
+        createUnitResolver(apiId, "Query", "loops", "local", WHILE_RESOLVER);
+        createUnitResolver(apiId, "Query", "keywordsInText", "local", KEYWORDS_IN_TEXT_RESOLVER);
     }
 
     @Test
@@ -183,6 +243,47 @@ class AppSyncJsResolverDockerIntegrationTest {
             // The shim and the Java bridge have to agree on the member carrying the type, or it is
             // dropped on the way out and every appended error arrives untyped.
             .body("errors[0].errorType", equalTo("Partial"));
+    }
+
+    // ── The APPSYNC_JS subset is enforced, not just documented ───────────────
+
+    @Test
+    void anAsyncResolverIsRefusedRatherThanRunOnNode() {
+        query("{ asyncResolver }")
+            .statusCode(200)
+            .body("data.asyncResolver", nullValue())
+            // Node would run this happily. AWS rejects it, so accepting it locally would green-light
+            // code that cannot deploy, which is the one thing an emulator must not do.
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("async"));
+    }
+
+    @Test
+    void aResolverImportingANodeBuiltinIsRefused() {
+        query("{ importsNode }")
+            .statusCode(200)
+            .body("data.importsNode", nullValue())
+            // APPSYNC_JS has no filesystem or network access at all.
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("node:fs"));
+    }
+
+    @Test
+    void aWhileLoopIsRefused() {
+        query("{ loops }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while"));
+    }
+
+    @Test
+    void theSameKeywordsInStringsAndCommentsAreNotRefused() {
+        // The check would be worse than useless if it rejected valid resolvers, so the scan blanks
+        // comments, strings and template text before looking for constructs.
+        query("{ keywordsInText }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.keywordsInText", equalTo("try catch class while ok"));
     }
 
     @Test

@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { registerHooks } from 'node:module';
 
 const PORT = Number(process.env.FLOCI_JS_RUNTIME_PORT || 4600);
 const ROOT = process.env.FLOCI_JS_RUNTIME_DIR || '/tmp/floci-appsync';
@@ -342,6 +343,52 @@ export function createPgStatement(...statements) {
 export const createMySQLStatement = createPgStatement;
 `;
 
+// @aws-appsync/utils/dynamodb. The helpers take plain values and build the request objects the
+// DynamoDB data source understands, marshalling keys and items on the way. get, put and remove are
+// implemented; the ones that compile a condition or update expression are not, and say so by name
+// rather than returning something the data source would silently mishandle.
+const UTILS_DDB = `
+import { util } from './index.mjs';
+
+const marshal = (value) => util.dynamodb.toMapValues(value ?? {});
+
+const notImplemented = (name) => () => {
+  throw new Error('@aws-appsync/utils/dynamodb.' + name + ' is not implemented by the AppSync '
+    + 'runtime shim in Floci; build the request object by hand for now.');
+};
+
+export function get(request) {
+  const built = { operation: 'GetItem', key: marshal(request.key) };
+  if (request.consistentRead !== undefined) built.consistentRead = request.consistentRead;
+  if (request.projection !== undefined) built.projection = request.projection;
+  return built;
+}
+
+export function put(request) {
+  const built = {
+    operation: 'PutItem',
+    key: marshal(request.key),
+    attributeValues: marshal(request.item)
+  };
+  if (request.condition !== undefined) built.condition = request.condition;
+  return built;
+}
+
+export function remove(request) {
+  const built = { operation: 'DeleteItem', key: marshal(request.key) };
+  if (request.condition !== undefined) built.condition = request.condition;
+  return built;
+}
+
+export const update = notImplemented('update');
+export const scan = notImplemented('scan');
+export const query = notImplemented('query');
+export const sync = notImplemented('sync');
+export const operations = new Proxy({}, {
+  get: (target, name) => notImplemented('operations.' + String(name))
+});
+`;
+
 const UTILS_PACKAGE_JSON = JSON.stringify({
   name: '@aws-appsync/utils',
   version: '1.0.0-floci',
@@ -350,7 +397,7 @@ const UTILS_PACKAGE_JSON = JSON.stringify({
   exports: {
     '.': './index.mjs',
     './rds': './rds.mjs',
-    './dynamodb': './index.mjs'
+    './dynamodb': './dynamodb.mjs'
   }
 }, null, 2);
 
@@ -359,6 +406,126 @@ fs.mkdirSync(RESOLVER_DIR, { recursive: true });
 fs.writeFileSync(path.join(UTILS_DIR, 'package.json'), UTILS_PACKAGE_JSON);
 fs.writeFileSync(path.join(UTILS_DIR, 'index.mjs'), UTILS_INDEX);
 fs.writeFileSync(path.join(UTILS_DIR, 'rds.mjs'), UTILS_RDS);
+fs.writeFileSync(path.join(UTILS_DIR, 'dynamodb.mjs'), UTILS_DDB);
+
+// APPSYNC_JS has no filesystem or network access, and resolver code can import nothing but
+// @aws-appsync/utils. A resolve hook enforces that: it sees static and dynamic imports alike, so a
+// dynamic import of a Node builtin cannot slip past a source scan. Imports made by the shim itself
+// still resolve, because there the parent URL is the shim rather than a resolver.
+const RESOLVER_URL_PREFIX = pathToFileURL(RESOLVER_DIR).href;
+const ALLOWED_SPECIFIERS = new Set([
+  '@aws-appsync/utils', '@aws-appsync/utils/rds', '@aws-appsync/utils/dynamodb'
+]);
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const parent = context.parentURL ?? '';
+    if (parent.startsWith(RESOLVER_URL_PREFIX) && !ALLOWED_SPECIFIERS.has(specifier)) {
+      throw Object.assign(
+        new Error('Unsupported import "' + specifier + '". APPSYNC_JS resolvers run without '
+          + 'filesystem or network access and can import only @aws-appsync/utils.'),
+        { flociUnsupported: true });
+    }
+    return nextResolve(specifier, context);
+  }
+});
+
+// AWS documents APPSYNC_JS as a restricted JavaScript runtime rather than Node. Evaluating resolver
+// code as ordinary Node would accept modules that cannot deploy, which is the worst thing an
+// emulator can do: green-light code that fails in production. These are the constructs AWS lists as
+// unavailable. Recursion is unavailable too and is not detectable lexically, so it is not checked.
+const BANNED_CONSTRUCTS = [
+  [/(?<![.\w$])class(?![\w$])/, 'class declarations'],
+  [/(?<![.\w$])while(?![\w$])/, 'while loops'],
+  [/(?<![.\w$])do(?![\w$])/, 'do...while loops'],
+  [/(?<![.\w$])try(?![\w$])/, 'try/catch'],
+  [/(?<![.\w$])catch(?![\w$])/, 'try/catch'],
+  [/(?<![.\w$])finally(?![\w$])/, 'try/catch/finally'],
+  [/(?<![.\w$])throw(?![\w$])/, 'throw, use util.error instead'],
+  [/(?<![.\w$])yield(?![\w$])/, 'generators'],
+  [/(?<![.\w$])function\s*\*/, 'generators'],
+  [/(?<![.\w$])async(?![\w$])/, 'async functions'],
+  [/(?<![.\w$])await(?![\w$])/, 'await'],
+  [/(?<![.\w$])this(?![\w$])/, 'this'],
+  [/(?<![.\w$])with\s*\(/, 'with statements'],
+  [/(?<![.\w$])eval\s*\(/, 'eval'],
+  [/(?<![.\w$])debugger(?![\w$])/, 'debugger'],
+  [/(?<![.\w$])require\s*\(/, 'require, modules are ES modules'],
+  [/(?<![.\w$])Promise(?![\w$])/, 'promises']
+];
+
+// Replaces the contents of comments, strings, template text and regex literals with spaces, so a
+// keyword inside one is not mistaken for code. Offsets are preserved, which keeps line numbers
+// honest. Expressions inside a template hole stay as code, because that is what they are.
+function blankLiterals(src) {
+  const out = src.split('');
+  const blank = (from, to) => {
+    for (let i = from; i < to && i < out.length; i++) {
+      if (out[i] !== '\n') out[i] = ' ';
+    }
+  };
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    const next = src[i + 1];
+    if (c === '/' && next === '/') {
+      const end = src.indexOf('\n', i);
+      const stop = end === -1 ? src.length : end;
+      blank(i, stop);
+      i = stop;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      const end = src.indexOf('*/', i + 2);
+      const stop = end === -1 ? src.length : end + 2;
+      blank(i, stop);
+      i = stop;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== c) {
+        if (src[j] === '\\') j++;
+        j++;
+      }
+      blank(i + 1, j);
+      i = j + 1;
+      continue;
+    }
+    if (c === String.fromCharCode(96)) {
+      i++;
+      let j = i;
+      while (j < src.length) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === String.fromCharCode(96)) { blank(i, j); i = j + 1; break; }
+        if (src[j] === '$' && src[j + 1] === '{') { blank(i, j); i = j + 2; break; }
+        j++;
+      }
+      if (j >= src.length) { blank(i, src.length); i = src.length; }
+      continue;
+    }
+    i++;
+  }
+  return out.join('');
+}
+
+function validateAppSyncSubset(code) {
+  const scanned = blankLiterals(code);
+  for (const [pattern, description] of BANNED_CONSTRUCTS) {
+    const match = pattern.exec(scanned);
+    if (match) {
+      const line = code.slice(0, match.index).split('\n').length;
+      return {
+        message: 'Unsupported in the APPSYNC_JS runtime: ' + description + ' (line ' + line
+          + '). AWS runs resolvers on a restricted JavaScript runtime, not Node, so this code '
+          + 'would be rejected on deploy.',
+        type: 'UnsupportedFeature'
+      };
+    }
+  }
+  return null;
+}
+
 
 const ERROR_MARKER = Symbol.for('floci.appsync.error');
 const RETURN_MARKER = Symbol.for('floci.appsync.earlyReturn');
@@ -387,6 +554,10 @@ function describeError(error) {
       stack: null
     };
   }
+  if (error && error.flociUnsupported) {
+    return { message: error.message, type: 'UnsupportedFeature', data: null, errorInfo: null,
+      stack: null };
+  }
   return {
     message: error?.message ?? String(error),
     type: error?.name ?? 'Error',
@@ -397,9 +568,15 @@ function describeError(error) {
 }
 
 async function evaluate(body) {
-  const { code, handler, context } = body;
+  const { code, handler, context, enforceSubset } = body;
   if (typeof code !== 'string' || !code.trim()) {
     return { ok: false, error: { message: 'no resolver code supplied', type: 'FlociBadRequest' } };
+  }
+  if (enforceSubset !== false) {
+    const unsupported = validateAppSyncSubset(code);
+    if (unsupported) {
+      return { ok: false, error: { ...unsupported, data: null, errorInfo: null, stack: null } };
+    }
   }
   const module = await loadResolver(code);
   const fn = module[handler];
@@ -418,8 +595,24 @@ async function evaluate(body) {
   ctx.args = ctx.arguments = ctx.arguments ?? ctx.args ?? {};
   globalThis.__floci_authType = context?.request?.authType ?? null;
 
+  if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+    return { ok: false, error: {
+      message: 'Unsupported in the APPSYNC_JS runtime: ' + handler + '() is an async function. '
+        + 'AWS runs resolvers on a restricted JavaScript runtime with no async support, so this '
+        + 'code would be rejected on deploy.',
+      type: 'UnsupportedFeature', data: null, errorInfo: null, stack: null } };
+  }
+
   try {
-    const result = await fn(ctx, utilsModule.util, utilsModule.runtime);
+    // Called without await: a handler that hands back a thenable is doing something the AppSync
+    // runtime cannot, and awaiting it here would hide that.
+    const result = fn(ctx, utilsModule.util, utilsModule.runtime);
+    if (result !== null && typeof result === 'object' && typeof result.then === 'function') {
+      return { ok: false, error: {
+        message: 'Unsupported in the APPSYNC_JS runtime: ' + handler + '() returned a promise. '
+          + 'AWS runs resolvers on a restricted JavaScript runtime with no promise support.',
+        type: 'UnsupportedFeature', data: null, errorInfo: null, stack: null } };
+    }
     return {
       ok: true,
       result: result === undefined ? null : result,
@@ -454,9 +647,23 @@ const evaluateSerially = (body) => {
   return next;
 };
 
+// AppSync caps resolver code at 32 KB, so this is far above anything legitimate; it exists so a
+// runaway or malformed request cannot grow the sidecar's heap without bound.
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
 const readBody = (req) => new Promise((resolve, reject) => {
   const chunks = [];
-  req.on('data', (chunk) => chunks.push(chunk));
+  let size = 0;
+  req.on('data', (chunk) => {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) {
+      reject(Object.assign(new Error('request body exceeds ' + MAX_BODY_BYTES + ' bytes'),
+        { status: 413 }));
+      req.destroy();
+      return;
+    }
+    chunks.push(chunk);
+  });
   req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
   req.on('error', reject);
 });
@@ -480,7 +687,7 @@ http.createServer(async (req, res) => {
     }
     send(res, 404, { ok: false, error: { message: 'not found', type: 'FlociBadRequest' } });
   } catch (error) {
-    send(res, 200, { ok: false, error: describeError(error) });
+    send(res, error.status === 413 ? 413 : 200, { ok: false, error: describeError(error) });
   }
 }).listen(PORT, '0.0.0.0', () => {
   console.log('floci appsync js runtime listening on ' + PORT + ' (node ' + process.version + ')');

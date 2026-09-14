@@ -283,19 +283,7 @@ public class DynamoDbDataSourceInvoker implements AppSyncDataSourceInvoker {
             return value.get("S").asText();
         }
         if (value.has("N")) {
-            String number = value.get("N").asText();
-            // Integral where it can be, so an ID field is 7 rather than 7.0 in the response.
-            // Deliberately not a conditional expression: one with Double and Long branches is
-            // subject to binary numeric promotion, which unboxes both and makes every number a
-            // double, including the ints that GraphQL Int fields are built from.
-            try {
-                if (number.contains(".") || number.contains("e") || number.contains("E")) {
-                    return Double.valueOf(number);
-                }
-                return Long.valueOf(number);
-            } catch (NumberFormatException e) {
-                return number;
-            }
+            return number(value.get("N").asText());
         }
         if (value.has("BOOL")) {
             return value.get("BOOL").asBoolean();
@@ -308,7 +296,7 @@ public class DynamoDbDataSourceInvoker implements AppSyncDataSourceInvoker {
         }
         if (value.has("NS")) {
             List<Object> numbers = new ArrayList<>();
-            value.get("NS").forEach(element -> numbers.add(Double.valueOf(element.asText())));
+            value.get("NS").forEach(element -> numbers.add(number(element.asText())));
             return numbers;
         }
         if (value.has("BS")) {
@@ -323,6 +311,26 @@ public class DynamoDbDataSourceInvoker implements AppSyncDataSourceInvoker {
             return unmarshalItem(value.get("M"));
         }
         return null;
+    }
+
+    /**
+     * A DynamoDB number as the nearest Java type: integral where it can be, so an id field is 7
+     * rather than 7.0 in the response and a GraphQL Int can be built from it.
+     *
+     * <p>Shared by the N and NS branches rather than written twice: the set branch kept returning
+     * Double after the scalar one was fixed. Deliberately not a conditional expression either, since
+     * one with Double and Long branches is subject to binary numeric promotion, which unboxes both
+     * and makes every number a double again.
+     */
+    private Object number(String value) {
+        try {
+            if (value.contains(".") || value.contains("e") || value.contains("E")) {
+                return Double.valueOf(value);
+            }
+            return Long.valueOf(value);
+        } catch (NumberFormatException e) {
+            return value;
+        }
     }
 
     private List<Object> toList(JsonNode array) {
