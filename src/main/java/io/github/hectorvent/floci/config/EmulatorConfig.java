@@ -2090,6 +2090,15 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        /**
+         * When set, Floci evaluates resolver code against this already-running server and skips
+         * container management entirely. Same contract as {@code floci.services.duck.url}: useful
+         * for running the sidecar by hand while working on it, and for an environment with no
+         * Docker socket to reach.
+         * Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_URL}
+         */
+        Optional<String> url();
+
         /** Env: {@code FLOCI_SERVICES_APPSYNC_JS_RUNTIME_IMAGE} */
         @WithDefault("node:22-alpine")
         String image();

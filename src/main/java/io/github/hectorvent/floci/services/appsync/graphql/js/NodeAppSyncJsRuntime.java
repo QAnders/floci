@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -51,7 +52,7 @@ import java.util.Optional;
  * into a {@code node_modules} directory at boot.
  */
 @ApplicationScoped
-public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
+public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(NodeAppSyncJsRuntime.class);
     private static final String SERVER_RESOURCE = "appsync/appsync-js-runtime.mjs";
@@ -127,6 +128,18 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
     /** Starts, or adopts, the sidecar. Idempotent; a failed start is retried by the next call. */
     synchronized void ensureStarted() {
         if (started && baseUrl != null) {
+            return;
+        }
+        Optional<String> configured = jsRuntimeConfig().url();
+        if (configured.isPresent() && !configured.get().isBlank()) {
+            // A server someone else is running: no container to create, adopt or stop. Probed with
+            // the short timeout, since a URL that is wrong should say so rather than hold the first
+            // resolver for the full start budget.
+            this.baseUrl = configured.get();
+            awaitHealthy(ADOPT_PROBE_SECONDS);
+            this.started = true;
+            this.lastError = null;
+            LOG.infov("Using the pre-configured AppSync JS runtime at {0}", baseUrl);
             return;
         }
         String image = jsRuntimeConfig().image();
@@ -405,9 +418,15 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
         return lastError;
     }
 
-    @PreDestroy
-    void shutdown() {
+    /**
+     * Stops the sidecar, so {@code /state/reset} and the shutdown phase reach it like every other
+     * managed container. Idempotent, and a no-op when the runtime is pointed at a URL someone else
+     * is running: that server is not ours to stop.
+     */
+    @Override
+    public synchronized void stopManagedContainers() {
         if (containerId == null) {
+            reset();
             return;
         }
         if (jsRuntimeConfig().keepRunningOnShutdown()) {
@@ -416,5 +435,10 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime {
         }
         lifecycleManager.stopAndRemove(containerId, logStream);
         reset();
+    }
+
+    @PreDestroy
+    void shutdown() {
+        stopManagedContainers();
     }
 }

@@ -324,6 +324,7 @@ than running.
 |---|---|---|
 | `floci.services.appsync.js-runtime.enabled` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_ENABLED` | `true` |
 | `floci.services.appsync.js-runtime.enforce-appsync-subset` | … `_ENFORCE_APPSYNC_SUBSET` | `true` |
+| `floci.services.appsync.js-runtime.url` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_URL` | unset |
 | `floci.services.appsync.js-runtime.image` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_IMAGE` | `node:22-alpine` |
 | `floci.services.appsync.js-runtime.container-name` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_CONTAINER_NAME` | `appsync-js-runtime` |
 | `floci.services.appsync.js-runtime.port` | `FLOCI_SERVICES_APPSYNC_JS_RUNTIME_PORT` | `0` (Docker picks) |
@@ -331,8 +332,14 @@ than running.
 | `floci.services.appsync.js-runtime.evaluation-timeout-seconds` | … `_EVALUATION_TIMEOUT_SECONDS` | `30` |
 | `floci.services.appsync.js-runtime.keep-running-on-shutdown` | … `_KEEP_RUNNING_ON_SHUTDOWN` | `false` |
 
-Resolver execution therefore needs Docker. Without it, a JS resolver fails its field with a message
-naming the sidecar; the management API is unaffected.
+Set `url` to point at a Node server someone is already running, in which case Floci skips container
+management entirely and never starts, adopts or stops anything. That is the same contract as
+`floci.services.duck.url`, and it is the way to work on the sidecar itself or to run somewhere with
+no Docker socket to reach.
+
+Otherwise resolver execution needs Docker. Without it, a JS resolver fails its field with a message
+naming the sidecar; the management API is unaffected. The container is stopped through
+`ContainerTeardown` along with the other process-bound containers.
 
 ### Pipelines
 
