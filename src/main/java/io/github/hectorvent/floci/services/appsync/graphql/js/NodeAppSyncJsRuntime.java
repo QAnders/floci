@@ -225,8 +225,9 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
             return true;
         } catch (RuntimeException e) {
             LOG.debugv("Could not adopt the existing AppSync JS runtime sidecar: {0}", e.getMessage());
+            // Left running on purpose: ensureStarted removes it by name straight after, since an
+            // adopted container that cannot serve is not ours to have started.
             reset();
-            this.containerId = null;
             return false;
         }
     }
@@ -327,8 +328,8 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
-            // The sidecar may have been removed under us; drop the state so the next call restarts it.
-            reset();
+            // The sidecar stopped answering, so the next call starts a fresh one.
+            discardSidecar();
             throw new AwsException("InternalFailureException",
                     "Could not reach the AppSync JS runtime sidecar: " + e.getMessage(), 500);
         }
@@ -393,8 +394,16 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
      * Drops every handle to the sidecar this instance was using. The container id and the log
      * follower go too: keeping them meant a later shutdown could stop and remove a container this
      * runtime no longer considered its own, and the follower was never closed on the failure path.
+     *
+     * <p>Synchronized on the same monitor as {@link #ensureStarted()} and
+     * {@link #stopManagedContainers()}, all four fields being shared between them. Without it a
+     * failed evaluation could clear the fields in the window after a container has been created and
+     * its id recorded but before {@code started} is set, which drops the only handle to a live
+     * container: teardown then sees a null id, treats the sidecar as never started, and the
+     * container is leaked rather than stopped. Reentrant, so the callers that already hold the
+     * monitor are unaffected.
      */
-    private void reset() {
+    private synchronized void reset() {
         this.started = false;
         this.baseUrl = null;
         this.containerId = null;
@@ -406,6 +415,31 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
             } catch (IOException e) {
                 LOG.debugv("Could not close the AppSync JS runtime log stream: {0}", e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Gives up on a sidecar that stopped answering, stopping it rather than merely forgetting it.
+     *
+     * <p>Forgetting is what leaks: nothing else holds the id, so the container would run until the
+     * next start happened to find it by name, and teardown could not reach it at all. Synchronized
+     * for the same reason {@link #reset()} is, and a no-op when the runtime is pointed at a URL
+     * someone else is running, which owns no container.
+     */
+    private synchronized void discardSidecar() {
+        String id = this.containerId;
+        Closeable stream = this.logStream;
+        this.containerId = null;
+        this.logStream = null;
+        reset();
+        if (id == null) {
+            return;
+        }
+        try {
+            lifecycleManager.stopAndRemove(id, stream);
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not remove the unreachable AppSync JS runtime sidecar {0}: {1}",
+                    id, e.getMessage());
         }
     }
 
