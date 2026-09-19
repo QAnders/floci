@@ -1,8 +1,5 @@
 package io.github.hectorvent.floci.services.appsync.graphql.resolver;
 
-import graphql.execution.DataFetcherResult;
-import graphql.schema.DataFetchingEnvironment;
-import graphql.schema.SelectedField;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvokers;
@@ -44,8 +41,8 @@ import java.util.Map;
  * <p>Two things stop a pipeline early. {@code runtime.earlyReturn(value)} makes {@code value} the
  * field's result immediately, skipping everything left including the after step, and
  * {@code util.error()} fails the field. {@code util.appendError} does neither: it collects errors
- * that are returned <em>alongside</em> the data, which is why this returns a
- * {@link DataFetcherResult} rather than a bare value.
+ * that are returned <em>alongside</em> the data, which is why a {@link ResolverOutcome} carries
+ * both rather than being a bare value.
  */
 @ApplicationScoped
 public class AppSyncResolverExecutor {
@@ -85,9 +82,8 @@ public class AppSyncResolverExecutor {
         }
     }
 
-    public DataFetcherResult<Object> execute(String apiId, Resolver resolver,
-                                             DataFetchingEnvironment environment) {
-        Execution execution = new Execution(apiId, resolver, environment);
+    public ResolverOutcome execute(Resolver resolver, ResolverInvocation invocation) {
+        Execution execution = new Execution(resolver, invocation);
         try {
             return execution.run();
         } catch (ResolverRaisedException e) {
@@ -97,10 +93,8 @@ public class AppSyncResolverExecutor {
             // the field rather than thrown: one broken field should not abort the whole operation.
             LOG.debugv("Resolver {0}.{1} failed: {2}", resolver.getTypeName(), resolver.getFieldName(),
                     e.getMessage());
-            return DataFetcherResult.newResult()
-                    .error(new AppSyncResolverError(e.getMessage(), e.getErrorCode(), null, null,
-                            errorPath(environment, resolver)))
-                    .build();
+            return new ResolverOutcome(null, new AppSyncResolverError(e.getMessage(), e.getErrorCode(),
+                    null, null, invocation.path()), List.of());
         }
     }
 
@@ -148,7 +142,7 @@ public class AppSyncResolverExecutor {
 
         private final String apiId;
         private final Resolver resolver;
-        private final DataFetchingEnvironment environment;
+        private final ResolverInvocation invocation;
         private final List<Object> path;
         private final List<AppSyncResolverError> errors = new ArrayList<>();
 
@@ -158,21 +152,21 @@ public class AppSyncResolverExecutor {
         private boolean returned;
         private Object earlyReturnValue;
 
-        private Execution(String apiId, Resolver resolver, DataFetchingEnvironment environment) {
-            this.apiId = apiId;
+        private Execution(Resolver resolver, ResolverInvocation invocation) {
+            this.apiId = invocation.apiId();
             this.resolver = resolver;
-            this.environment = environment;
-            this.path = errorPath(environment, resolver);
+            this.invocation = invocation;
+            this.path = invocation.path();
         }
 
-        private DataFetcherResult<Object> run() {
+        private ResolverOutcome run() {
             if (resolver.getKind() == ResolverKind.PIPELINE) {
                 return runPipeline();
             }
             return runUnit();
         }
 
-        private DataFetcherResult<Object> runUnit() {
+        private ResolverOutcome runUnit() {
             Stage stage = Stage.of(resolver);
             Object request = callHandler(stage, REQUEST, null, null, null);
             if (returned) {
@@ -184,7 +178,7 @@ public class AppSyncResolverExecutor {
             return result(returned ? earlyReturnValue : response);
         }
 
-        private DataFetcherResult<Object> runPipeline() {
+        private ResolverOutcome runPipeline() {
             // The before step's job is usually to fill ctx.stash for the functions; its return value
             // is not the field's result, but it is what the first function sees as ctx.prev.result.
             Stage resolverStage = Stage.of(resolver);
@@ -353,16 +347,15 @@ public class AppSyncResolverExecutor {
         /** The {@code ctx} a handler receives. */
         private Map<String, Object> context(Object result, JsEvaluation.JsError error) {
             Map<String, Object> context = new LinkedHashMap<>();
-            Map<String, Object> arguments = environment.getArguments() == null
-                    ? Map.of() : environment.getArguments();
+            Map<String, Object> arguments = invocation.arguments();
             context.put("arguments", arguments);
             context.put("args", arguments);
-            context.put("source", environment.getSource());
+            context.put("source", invocation.source());
             context.put("stash", stash);
             Map<String, Object> prev = new LinkedHashMap<>();
             prev.put("result", previousResult);
             context.put("prev", prev);
-            context.put("identity", environment.getGraphQlContext().get("identity"));
+            context.put("identity", invocation.identity());
             context.put("request", requestContext());
             context.put("info", info());
             context.put("env", environmentVariables());
@@ -382,10 +375,10 @@ public class AppSyncResolverExecutor {
 
         private Map<String, Object> requestContext() {
             Map<String, Object> request = new LinkedHashMap<>();
-            // Headers are not on the GraphQL context, so ctx.request.headers is empty rather than
-            // wrong. authType is, and a resolver keying off it behaves as it would on AWS.
+            // The callback does not carry the client's headers, so ctx.request.headers is empty
+            // rather than wrong. authType it does, and a resolver keying off it behaves as on AWS.
             request.put("headers", Map.of());
-            request.put("authType", environment.getGraphQlContext().get("authType"));
+            request.put("authType", invocation.authType());
             request.put("domainName", null);
             return request;
         }
@@ -396,14 +389,10 @@ public class AppSyncResolverExecutor {
             // that reaches here, and available whether or not the caller supplied step info.
             info.put("fieldName", resolver.getFieldName());
             info.put("parentTypeName", resolver.getTypeName());
-            info.put("variables", environment.getVariables() == null ? Map.of() : environment.getVariables());
-            List<String> selectionSet = new ArrayList<>();
-            if (environment.getSelectionSet() != null) {
-                for (SelectedField field : environment.getSelectionSet().getFields()) {
-                    selectionSet.add(field.getQualifiedName());
-                }
-            }
-            info.put("selectionSetList", selectionSet);
+            info.put("variables", invocation.variables());
+            // Already qualified names (slash-separated for a nested selection) when they reach here:
+            // the sidecar builds them from graphql-java's own SelectedField.getQualifiedName().
+            info.put("selectionSetList", invocation.selectionSetList());
             info.put("selectionSetGraphQL", null);
             return info;
         }
@@ -418,38 +407,13 @@ public class AppSyncResolverExecutor {
         }
 
         /** The field's outcome when a resolver raised an error: no data, every error collected. */
-        private DataFetcherResult<Object> failure(AppSyncResolverError raised) {
-            DataFetcherResult.Builder<Object> builder = DataFetcherResult.newResult();
-            errors.forEach(builder::error);
-            builder.error(raised);
-            return builder.build();
+        private ResolverOutcome failure(AppSyncResolverError raised) {
+            return new ResolverOutcome(null, raised, errors);
         }
 
-        private DataFetcherResult<Object> result(Object data) {
-            DataFetcherResult.Builder<Object> builder = DataFetcherResult.newResult().data(data);
-            errors.forEach(builder::error);
-            return builder.build();
+        private ResolverOutcome result(Object data) {
+            return new ResolverOutcome(data, null, errors);
         }
-    }
-
-    /**
-     * Where in the response an error belongs. The execution path is preferred, since it names the
-     * exact list element for a field resolved inside a list, and the field name stands in when a
-     * caller drives the executor without full execution step info.
-     */
-    private static List<Object> errorPath(DataFetchingEnvironment environment, Resolver resolver) {
-        try {
-            // getExecutionStepInfo() itself throws when the environment carries none, rather than
-            // answering null, so this cannot be a null check.
-            if (environment.getExecutionStepInfo() != null
-                    && environment.getExecutionStepInfo().getPath() != null) {
-                return environment.getExecutionStepInfo().getPath().toList();
-            }
-        } catch (RuntimeException e) {
-            LOG.tracev("No execution step info for {0}.{1}; using the field name as the error path",
-                    resolver.getTypeName(), resolver.getFieldName());
-        }
-        return List.of(resolver.getFieldName());
     }
 
     /** Carries a resolver-raised error out of the pipeline to the field's result. */

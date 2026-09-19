@@ -2,14 +2,13 @@ package io.github.hectorvent.floci.services.appsync;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import org.junit.jupiter.api.Assumptions;
+import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -21,17 +20,18 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
- * Executes real {@code APPSYNC_JS} resolvers end to end: a GraphQL query over HTTP, through the
- * schema's data fetchers, the pipeline, the Node sidecar and back.
+ * Executes real {@code APPSYNC_JS} resolvers end to end: a GraphQL query over HTTP, out to the
+ * GraphQL sidecar, back through Floci's resolver callback, then the pipeline and the Node sidecar.
  *
  * <p>Everything here runs the resolver code as written, the {@code @aws-appsync/utils} imports
  * included, so it is the test that says whether an AppSync API deployed into Floci answers
  * queries rather than nulls. A {@code NONE} data source keeps the assertions about the pipeline
  * itself; the data-source adapters have their own tests.
  *
- * <p>Needs Docker for the sidecar, and skips without it.
+ * <p>Needs Docker for both sidecars, and skips without it.
  */
 @QuarkusTest
+@TestProfile(AppSyncResolverCallbackProfile.class)
 class AppSyncJsResolverDockerIntegrationTest {
 
     private static final String AUTH =
@@ -159,25 +159,8 @@ class AppSyncJsResolverDockerIntegrationTest {
 
     @BeforeAll
     static void configure() {
-        Assumptions.assumeTrue(dockerAvailable(),
-                "Docker is required for the AppSync JS resolver sidecar");
+        AppSyncGraphqlSidecarProfile.requireDockerAndTheSidecarImage();
         RestAssuredJsonUtils.configureAwsContentTypes();
-    }
-
-    private static boolean dockerAvailable() {
-        try {
-            Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
-                    .redirectErrorStream(true).start();
-            // Bounded: an unresponsive daemon would otherwise hang the probe, and with it CI,
-            // instead of the suite simply skipping.
-            if (!process.waitFor(10, TimeUnit.SECONDS)) {
-                process.destroyForcibly();
-                return false;
-            }
-            return process.exitValue() == 0;
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     @BeforeEach

@@ -28,4 +28,7 @@ grep -q '/verifiedpermissions/' "$SHARD_FILE" && [ -n "$CEDAR_IMAGE" ] && pull "
 # services/cloudformation/, so it needs its own token alongside the /appsync/ path match.
 GRAPHQL_IMAGE="$(grep -oE 'graphql-image: *"[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 grep -qE '/appsync/|AppSyncCfnIntegrationTest' "$SHARD_FILE" && [ -n "$GRAPHQL_IMAGE" ] && pull "$GRAPHQL_IMAGE"
+# The AppSync JS resolver tests also start a Node sidecar; same rule, read the pin rather than copy it.
+JS_RUNTIME_IMAGE="$(grep -oE 'image: *"node:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
+grep -q '/appsync/' "$SHARD_FILE" && [ -n "$JS_RUNTIME_IMAGE" ] && pull "$JS_RUNTIME_IMAGE"
 exit 0
