@@ -279,6 +279,24 @@ data source is called, and the field gets the value the code returned.
 with a message saying so, rather than resolving to `null`: a null that means "not implemented" is
 indistinguishable from a null that means "no rows".
 
+### How a resolver gets called
+
+The GraphQL engine runs in the `floci-sidecar-graphql` container, so the sidecar walks the query and
+Floci owns the resolvers. `POST /v1/execute` carries a `resolve` block naming every coordinate the
+query touches that has a resolver, plus a callback URL and a token minted for that one operation.
+The sidecar then batches each execution level into a single `POST /appsync-resolve`, Floci runs each
+field's resolver and answers with a value or an error, and a value becomes the `source` of that
+field's own children. The contract is [`graphql/API.md`](https://github.com/floci-io/floci-sidecars/blob/main/graphql/API.md)
+in floci-io/floci-sidecars.
+
+Field authorization is applied before any of this: a denied coordinate is never listed in `resolve`,
+so it cannot reach a resolver. The token stops working the moment the operation returns.
+
+One AppSync behaviour does not fit the callback response, which carries a value or an error per
+field and never both: `util.appendError` means "report this **and** keep the data". Those errors
+come back to Floci on the operation's session instead and are merged into the response envelope, so
+a resolver that appends errors still returns its data alongside them.
+
 ### How the code runs
 
 Resolver JavaScript runs in a **Node sidecar container**, started lazily on the first JS resolver

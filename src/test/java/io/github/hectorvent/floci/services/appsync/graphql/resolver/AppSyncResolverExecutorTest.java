@@ -1,8 +1,5 @@
 package io.github.hectorvent.floci.services.appsync.graphql.resolver;
 
-import graphql.execution.DataFetcherResult;
-import graphql.schema.DataFetchingEnvironment;
-import graphql.schema.DataFetchingEnvironmentImpl;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.datasource.AppSyncDataSourceInvoker;
@@ -133,10 +130,8 @@ class AppSyncResolverExecutorTest {
         return fn;
     }
 
-    private DataFetchingEnvironment environment(Map<String, Object> arguments) {
-        return DataFetchingEnvironmentImpl.newDataFetchingEnvironment()
-                .arguments(arguments)
-                .build();
+    private ResolverInvocation invocation(Map<String, Object> arguments) {
+        return new ResolverInvocation(API_ID, "Query", "getThing", arguments, null, null, null, null, null, null);
     }
 
     @Test
@@ -149,12 +144,12 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("unit-code", "response", (h, ctx) -> ok(List.of(Map.of("id", 1))));
         invoker.answer = Map.of("sqlStatementResults", List.of());
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         assertEquals(List.of("unit-code#request", "unit-code#response"), jsRuntime.calls);
         assertEquals(List.of(Map.of("statement", "select 1")), invoker.requests);
-        assertEquals(List.of(Map.of("id", 1)), result.getData());
-        assertTrue(result.getErrors().isEmpty());
+        assertEquals(List.of(Map.of("id", 1)), result.data());
+        assertTrue(result.errors().isEmpty());
         // The response handler sees the data source's answer as ctx.result.
         assertEquals(Map.of("sqlStatementResults", List.of()), jsRuntime.contexts.get(1).get("result"));
         assertEquals(Map.of("QUOTA", "10"), jsRuntime.contexts.get(0).get("env"));
@@ -174,12 +169,12 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("fn2-code", "response", (h, ctx) -> ok("second"));
         jsRuntime.script("pipeline-code", "response", (h, ctx) -> ok(ctx.get("result")));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         assertEquals(List.of("pipeline-code#request", "fn1-code#request", "fn1-code#response",
                 "fn2-code#request", "fn2-code#response", "pipeline-code#response"), jsRuntime.calls);
         // The after step is handed the last function's result as ctx.result.
-        assertEquals("second", result.getData());
+        assertEquals("second", result.data());
     }
 
     @Test
@@ -196,7 +191,7 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("fn2-code", "response", (h, ctx) -> ok("fn2-result"));
         jsRuntime.script("pipeline-code", "response", (h, ctx) -> ok(ctx.get("result")));
 
-        executor.execute(API_ID, resolver, environment(Map.of()));
+        executor.execute(resolver, invocation(Map.of()));
 
         // fn1's request sees the before step's return as ctx.prev.result and its stash.
         assertEquals(Map.of("result", "before-result"), jsRuntime.contexts.get(1).get("prev"));
@@ -213,11 +208,11 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("pipeline-code", "request", (h, ctx) ->
                 new JsEvaluation(Map.of("cached", true), Map.of(), true, List.of(), null, false));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         assertEquals(List.of("pipeline-code#request"), jsRuntime.calls);
         assertTrue(invoker.requests.isEmpty(), "runtime.earlyReturn must not reach the data source");
-        assertEquals(Map.of("cached", true), result.getData());
+        assertEquals(Map.of("cached", true), result.data());
     }
 
     @Test
@@ -228,16 +223,16 @@ class AppSyncResolverExecutorTest {
                 List.of(), new JsEvaluation.JsError("orgNo is required", "BadRequest",
                 Map.of("field", "orgNo"), null), false));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
-        assertNull(result.getData());
+        assertNull(result.data());
         assertTrue(invoker.requests.isEmpty(), "util.error must stop before the data source");
-        assertEquals(1, result.getErrors().size());
-        AppSyncResolverError error = (AppSyncResolverError) result.getErrors().get(0);
-        assertEquals("orgNo is required", error.getMessage());
+        assertEquals(1, result.errors().size());
+        AppSyncResolverError error = result.errors().get(0);
+        assertEquals("orgNo is required", error.message());
         // Clients switch on errorType, so it has to survive into the response extensions.
-        assertEquals("BadRequest", error.getExtensions().get("errorType"));
-        assertEquals(Map.of("field", "orgNo"), error.getExtensions().get("data"));
+        assertEquals("BadRequest", error.errorType());
+        assertEquals(Map.of("field", "orgNo"), error.data());
     }
 
     @Test
@@ -251,12 +246,12 @@ class AppSyncResolverExecutorTest {
                 List.of(new JsEvaluation.JsError("one row was dropped", "Partial", null, null)),
                 null, false));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         // util.appendError is the one that does not stop anything: data and errors together.
-        assertEquals(List.of("partial"), result.getData());
-        assertEquals(1, result.getErrors().size());
-        assertEquals("one row was dropped", result.getErrors().get(0).getMessage());
+        assertEquals(List.of("partial"), result.data());
+        assertEquals(1, result.errors().size());
+        assertEquals("one row was dropped", result.errors().get(0).message());
     }
 
     @Test
@@ -271,9 +266,9 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("pipeline-code", "response", (h, ctx) -> ok(ctx.get("result")));
         invoker.answer = List.of(Map.of("id", 7));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
-        assertEquals(List.of(Map.of("id", 7)), result.getData());
+        assertEquals(List.of(Map.of("id", 7)), result.data());
     }
 
     @Test
@@ -284,11 +279,11 @@ class AppSyncResolverExecutorTest {
         resolver.setPipelineConfig(Map.of("functions", List.of("gone")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
-        assertEquals(1, result.getErrors().size());
-        assertTrue(result.getErrors().get(0).getMessage().contains("gone"),
-                result.getErrors().get(0).getMessage());
+        assertEquals(1, result.errors().size());
+        assertTrue(result.errors().get(0).message().contains("gone"),
+                result.errors().get(0).message());
     }
 
     // ── ctx.error ────────────────────────────────────────────────────────────
@@ -303,7 +298,7 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("unit-code", "request", (h, ctx) -> ok(Map.of("statement", "select 1")));
         jsRuntime.script("unit-code", "response", (h, ctx) -> ok(Map.of("handled", true)));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         // AppSync's shape, which a resolver forwards as util.error(ctx.error.message, ctx.error.type).
         Map<?, ?> ctxError = (Map<?, ?>) jsRuntime.contexts.get(1).get("error");
@@ -312,8 +307,8 @@ class AppSyncResolverExecutorTest {
         assertEquals("DatabaseErrorException", ctxError.get("type"));
         assertNull(jsRuntime.contexts.get(1).get("result"), "a failed call has no result");
         // The handler returned a value and did not re-raise, so on AWS the error is suppressed.
-        assertEquals(Map.of("handled", true), result.getData());
-        assertTrue(result.getErrors().isEmpty(),
+        assertEquals(Map.of("handled", true), result.data());
+        assertTrue(result.errors().isEmpty(),
                 "an error the response handler chose not to re-raise is suppressed");
     }
 
@@ -329,13 +324,13 @@ class AppSyncResolverExecutorTest {
                 List.of(), new JsEvaluation.JsError("Error getting messages", "DatabaseErrorException",
                 "relation does not exist", null), false));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
-        assertNull(result.getData());
-        assertEquals(1, result.getErrors().size());
-        AppSyncResolverError error = (AppSyncResolverError) result.getErrors().get(0);
-        assertEquals("Error getting messages", error.getMessage());
-        assertEquals("DatabaseErrorException", error.getExtensions().get("errorType"));
+        assertNull(result.data());
+        assertEquals(1, result.errors().size());
+        AppSyncResolverError error = result.errors().get(0);
+        assertEquals("Error getting messages", error.message());
+        assertEquals("DatabaseErrorException", error.errorType());
     }
 
     @Test
@@ -347,12 +342,12 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("unit-code", "request", (h, ctx) -> ok(Map.of()));
         // No response script: the module exports none, so nothing can decide to suppress.
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
-        assertEquals(1, result.getErrors().size());
-        assertEquals("connection refused", result.getErrors().get(0).getMessage());
+        assertEquals(1, result.errors().size());
+        assertEquals("connection refused", result.errors().get(0).message());
         assertEquals("DatabaseErrorException",
-                ((AppSyncResolverError) result.getErrors().get(0)).getExtensions().get("errorType"));
+                result.errors().get(0).errorType());
     }
 
     @Test
@@ -371,13 +366,13 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("fn2-code", "response", (h, ctx) -> ok(Map.of("items", ctx.get("result"))));
         jsRuntime.script("pipeline-code", "response", (h, ctx) -> ok(ctx.get("result")));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         // fn2 ran, and saw fn1's substituted value as ctx.prev.result.
         assertEquals(List.of("pipeline-code#request", "fn1-code#request", "fn1-code#response",
                 "fn2-code#request", "fn2-code#response", "pipeline-code#response"), jsRuntime.calls);
         assertEquals(Map.of("result", List.of()), jsRuntime.contexts.get(3).get("prev"));
-        assertTrue(result.getErrors().isEmpty());
+        assertTrue(result.errors().isEmpty());
     }
 
     @Test
@@ -394,13 +389,13 @@ class AppSyncResolverExecutorTest {
                 List.of(), new JsEvaluation.JsError("query failed", "DatabaseErrorException", null, null),
                 false));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         // fn2 and the after step never run.
         assertEquals(List.of("pipeline-code#request", "fn1-code#request", "fn1-code#response"),
                 jsRuntime.calls);
-        assertEquals(1, result.getErrors().size());
-        assertEquals("query failed", result.getErrors().get(0).getMessage());
+        assertEquals(1, result.errors().size());
+        assertEquals("query failed", result.errors().get(0).message());
     }
 
     @Test
@@ -411,7 +406,7 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("unit-code", "request", (h, ctx) -> ok(Map.of()));
         jsRuntime.script("unit-code", "response", (h, ctx) -> ok("fine"));
 
-        executor.execute(API_ID, resolver, environment(Map.of()));
+        executor.execute(resolver, invocation(Map.of()));
 
         // Absent, not null: `if (ctx.error)` must be false, and the request handler never sees one.
         assertFalse(jsRuntime.contexts.get(0).containsKey("error"));
@@ -427,14 +422,14 @@ class AppSyncResolverExecutorTest {
         resolver.setRequestMappingTemplate("{\"version\":\"2018-05-29\"}");
         resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         // AppSync leaves Runtime unset on a VTL resolver, so "no runtime" must not read as
         // APPSYNC_JS: that made this fall through to the pass-through arm and resolve to null,
         // which is indistinguishable from an empty result.
-        assertEquals(1, result.getErrors().size());
-        assertTrue(result.getErrors().get(0).getMessage().contains("VTL"),
-                result.getErrors().get(0).getMessage());
+        assertEquals(1, result.errors().size());
+        assertTrue(result.errors().get(0).message().contains("VTL"),
+                result.errors().get(0).message());
         assertTrue(invoker.requests.isEmpty(), "a VTL resolver must not reach the data source");
     }
 
@@ -445,11 +440,11 @@ class AppSyncResolverExecutorTest {
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
-        assertEquals(1, result.getErrors().size());
-        assertTrue(result.getErrors().get(0).getMessage().contains("VTL"),
-                result.getErrors().get(0).getMessage());
+        assertEquals(1, result.errors().size());
+        assertTrue(result.errors().get(0).message().contains("VTL"),
+                result.errors().get(0).message());
     }
 
     @Test
@@ -460,10 +455,10 @@ class AppSyncResolverExecutorTest {
         runtime.setName(ResolverRuntimeName.VTL);
         resolver.setRuntime(runtime);
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
-        assertEquals(1, result.getErrors().size());
-        assertTrue(result.getErrors().get(0).getMessage().contains("VTL"));
+        assertEquals(1, result.errors().size());
+        assertTrue(result.errors().get(0).message().contains("VTL"));
     }
 
     @Test
@@ -476,11 +471,11 @@ class AppSyncResolverExecutorTest {
         jsRuntime.script("pipeline-code", "response", (h, ctx) -> ok(ctx.get("result")));
         invoker.answer = List.of(Map.of("id", 1));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         // No code and no templates is not VTL: there is simply nothing to run.
-        assertTrue(result.getErrors().isEmpty());
-        assertEquals(List.of(Map.of("id", 1)), result.getData());
+        assertTrue(result.errors().isEmpty());
+        assertEquals(List.of(Map.of("id", 1)), result.data());
     }
 
     @Test
@@ -492,13 +487,13 @@ class AppSyncResolverExecutorTest {
         resolver.setPipelineConfig(Map.of("functions", List.of("fn1")));
         jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(null));
 
-        DataFetcherResult<Object> result = executor.execute(API_ID, resolver, environment(Map.of()));
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of()));
 
         // Reporting a 409 as "function does not exist" hides the real cause.
-        assertEquals(1, result.getErrors().size());
-        assertEquals("Schema is being modified", result.getErrors().get(0).getMessage());
+        assertEquals(1, result.errors().size());
+        assertEquals("Schema is being modified", result.errors().get(0).message());
         assertEquals("ConcurrentModificationException",
-                ((AppSyncResolverError) result.getErrors().get(0)).getExtensions().get("errorType"));
+                result.errors().get(0).errorType());
     }
 
     private FunctionConfiguration vtlFunction(String id) {
