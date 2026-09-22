@@ -284,7 +284,7 @@ indistinguishable from a null that means "no rows".
 The GraphQL engine runs in the `floci-sidecar-graphql` container, so the sidecar walks the query and
 Floci owns the resolvers. `POST /v1/execute` carries a `resolve` block naming every coordinate the
 query touches that has a resolver, plus a callback URL and a token minted for that one operation.
-The sidecar then batches each execution level into a single `POST /appsync-resolve`, Floci runs each
+The sidecar then batches each execution level into a single `POST /_floci/appsync/resolve`, Floci runs each
 field's resolver and answers with a value or an error, and a value becomes the `source` of that
 field's own children. The contract is [`graphql/API.md`](https://github.com/floci-io/floci-sidecars/blob/main/graphql/API.md)
 in floci-io/floci-sidecars.

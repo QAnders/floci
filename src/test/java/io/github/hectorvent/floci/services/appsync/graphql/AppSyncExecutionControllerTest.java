@@ -221,7 +221,7 @@ class AppSyncExecutionControllerTest {
         verify(sidecarClient).execute(any(), any(), any(), any(), any(), any(), spec.capture());
         assertEquals(List.of(new GraphqlSidecarClient.ResolveField("Query", "getMessages")),
                 spec.getValue().fields());
-        assertEquals("http://floci.local:4566/appsync-resolve", spec.getValue().url());
+        assertEquals("http://floci.local:4566/_floci/appsync/resolve", spec.getValue().url());
         assertNotNull(spec.getValue().token());
     }
 

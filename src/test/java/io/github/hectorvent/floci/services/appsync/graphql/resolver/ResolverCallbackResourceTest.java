@@ -106,6 +106,30 @@ class ResolverCallbackResourceTest {
     }
 
     @Test
+    void aNullValuedArgumentIsPassedThroughRatherThanFailingTheWholeBatch() {
+        Resolver resolver = aResolver();
+        when(executor.findResolver(eq(API_ID), any(), any())).thenReturn(resolver);
+        when(executor.execute(eq(resolver), any())).thenReturn(new ResolverOutcome("ok", null, List.of()));
+
+        String withNull = "{\"id\":\"0\",\"typeName\":\"Query\",\"fieldName\":\"getMessages\","
+                + "\"arguments\":{\"nextToken\":null},\"variables\":{\"after\":null},"
+                + "\"path\":[\"getMessages\"],\"selectionSetList\":[\"id\"]}";
+        List<Map<String, Object>> results = results(resource.resolve("Bearer " + session.token(), body(withNull)));
+
+        // getMessages(nextToken: null) is ordinary GraphQL, and an explicit null is not the same as
+        // an absent argument to a resolver reading ctx.args. Copying the map with Map.copyOf threw
+        // on the null, which answered 500 and failed every field in the batch, not just this one.
+        assertEquals("ok", results.get(0).get("data"));
+        org.mockito.ArgumentCaptor<ResolverInvocation> captor =
+                org.mockito.ArgumentCaptor.forClass(ResolverInvocation.class);
+        verify(executor).execute(eq(resolver), captor.capture());
+        assertTrue(captor.getValue().arguments().containsKey("nextToken"));
+        assertNull(captor.getValue().arguments().get("nextToken"));
+        assertTrue(captor.getValue().variables().containsKey("after"));
+        assertNull(captor.getValue().variables().get("after"));
+    }
+
+    @Test
     void aFailedResolverBecomesAnErrorResultCarryingTheTypeTheResolverChose() {
         Resolver resolver = aResolver();
         when(executor.findResolver(eq(API_ID), any(), any())).thenReturn(resolver);

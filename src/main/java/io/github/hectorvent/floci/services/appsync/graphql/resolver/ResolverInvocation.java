@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.appsync.graphql.resolver;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -23,9 +26,26 @@ public record ResolverInvocation(String apiId, String typeName, String fieldName
     public ResolverInvocation {
         // Normalised here rather than at each read: the callback may omit any of them, and every
         // consumer wants the empty collection rather than a null it has to re-check.
-        arguments = arguments == null ? Map.of() : Map.copyOf(arguments);
-        variables = variables == null ? Map.of() : Map.copyOf(variables);
-        selectionSetList = selectionSetList == null ? List.of() : List.copyOf(selectionSetList);
-        path = path == null || path.isEmpty() ? List.of(fieldName) : List.copyOf(path);
+        arguments = copyOf(arguments);
+        variables = copyOf(variables);
+        selectionSetList = copyOf(selectionSetList);
+        path = path == null || path.isEmpty() ? List.of(fieldName) : copyOf(path);
+    }
+
+    /**
+     * Null-tolerant, unlike {@code Map.copyOf}, which rejects a null value.
+     *
+     * <p>A null argument is ordinary GraphQL: {@code getMessages(nextToken: null)} is how a client
+     * asks for the first page, and an explicit null is not the same as an absent argument to a
+     * resolver reading {@code ctx.args}. Rejecting it here failed every field in the callback batch,
+     * not just the one field that had it.
+     */
+    private static <V> Map<String, V> copyOf(Map<String, V> values) {
+        return values == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(values));
+    }
+
+    /** Null-tolerant for the same reason: a list-valued argument may carry a null element. */
+    private static <V> List<V> copyOf(List<V> values) {
+        return values == null ? List.of() : Collections.unmodifiableList(new ArrayList<>(values));
     }
 }

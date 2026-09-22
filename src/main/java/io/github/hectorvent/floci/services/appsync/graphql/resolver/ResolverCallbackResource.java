@@ -29,11 +29,13 @@ import java.util.Optional;
  * values and the {@code source} of their own children. The contract is {@code graphql/API.md} in
  * floci-io/floci-sidecars.
  *
- * <p>The literal {@code /appsync-resolve} path follows {@code /cfn-response}: a fixed Floci-internal
- * route, presented to the container as an absolute URL, authorised by a per-execution bearer token
- * rather than by AWS credentials.
+ * <p>A fixed Floci-internal route, presented to the container as an absolute URL and authorised by
+ * a per-execution bearer token rather than by AWS credentials. It sits under the {@code _floci/}
+ * namespace, with the EKS webhooks, rather than at a bare path: a bare path is reachable as a
+ * path-style S3 request for a bucket of that name, and an S3 bucket name cannot begin with an
+ * underscore, so this prefix cannot be shadowed by one.
  */
-@Path("/appsync-resolve")
+@Path("/_floci/appsync/resolve")
 public class ResolverCallbackResource {
 
     private static final Logger LOG = Logger.getLogger(ResolverCallbackResource.class);

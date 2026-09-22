@@ -73,11 +73,11 @@ class GraphqlSidecarClientTest {
         answer("/v1/execute", 200, "{\"data\":{\"getPost\":null}}");
 
         client.execute("type Query { getPost: String }", Map.of(), "{ getPost }", Map.of(), null,
-                List.of(), new ResolveSpec("http://floci:4566/appsync-resolve", "tok-1",
+                List.of(), new ResolveSpec("http://floci:4566/_floci/appsync/resolve", "tok-1",
                         List.of(new ResolveField("Query", "getPost")), 100));
 
         JsonNode resolve = lastBody.get().get("resolve");
-        assertThat(resolve.get("url").asText(), equalTo("http://floci:4566/appsync-resolve"));
+        assertThat(resolve.get("url").asText(), equalTo("http://floci:4566/_floci/appsync/resolve"));
         assertThat(resolve.get("token").asText(), equalTo("tok-1"));
         assertThat(resolve.get("maxBatch").asInt(), equalTo(100));
         assertThat(resolve.get("fields").size(), equalTo(1));
@@ -95,7 +95,7 @@ class GraphqlSidecarClientTest {
         assertThat(lastBody.get().has("resolve"), is(false));
 
         client.execute("type Query { hello: String }", Map.of(), "{ hello }", Map.of(), null, List.of(),
-                new ResolveSpec("http://floci:4566/appsync-resolve", "tok-2", List.of(), 100));
+                new ResolveSpec("http://floci:4566/_floci/appsync/resolve", "tok-2", List.of(), 100));
         assertThat(lastBody.get().has("resolve"), is(false));
     }
 

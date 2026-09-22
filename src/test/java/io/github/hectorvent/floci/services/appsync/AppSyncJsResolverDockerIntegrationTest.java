@@ -41,7 +41,8 @@ class AppSyncJsResolverDockerIntegrationTest {
             type Message { id: ID! name: String }
             type Query {
               getMessages(orgNo: String!): [Message]
-              ping: String
+              ping(x: String): String
+              echoArg(x: String): String
               failing: String
               warned: String
               asyncResolver: String
@@ -85,6 +86,17 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             export function response(ctx) {
               return ctx.result.value;
+            }
+            """;
+
+    /** Reports back what reached ctx.args, so an explicit null is distinguishable from an absent one. */
+    private static final String ECHO_ARG_RESOLVER = """
+            import { util } from "@aws-appsync/utils";
+            export function request(ctx) {
+              return { payload: { count: Object.keys(ctx.args).length, value: ctx.args.x } };
+            }
+            export function response(ctx) {
+              return "count=" + ctx.result.count + " value=" + util.toJson(ctx.result.value);
             }
             """;
 
@@ -174,6 +186,7 @@ class AppSyncJsResolverDockerIntegrationTest {
         String functionId = createFunction(apiId, "Query_getMessages_0", "local", PIPELINE_FUNCTION);
         createPipelineResolver(apiId, "Query", "getMessages", PIPELINE_RESOLVER, functionId);
         createUnitResolver(apiId, "Query", "ping", "local", UNIT_RESOLVER);
+        createUnitResolver(apiId, "Query", "echoArg", "local", ECHO_ARG_RESOLVER);
         createUnitResolver(apiId, "Query", "failing", "local", FAILING_RESOLVER);
         createUnitResolver(apiId, "Query", "warned", "local", WARNING_RESOLVER);
         createUnitResolver(apiId, "Query", "asyncResolver", "local", ASYNC_RESOLVER);
@@ -200,6 +213,30 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.ping", equalTo("pong"));
+    }
+
+    @Test
+    void anExplicitNullArgumentReachesTheResolverInsteadOfFailingTheBatch() {
+        // nextToken: null is ordinary GraphQL, and an explicit null is not the same as an absent
+        // argument to a resolver reading ctx.args. It also has to survive the callback: one null
+        // used to fail every field in that batch, not only the field carrying it.
+        query("{ ping(x: null) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.ping", equalTo("pong"));
+
+        query("{ echoArg(x: null) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.echoArg", equalTo("count=1 value=null"));
+
+        // The contrast that matters: an absent argument is not in ctx.args at all, where an explicit
+        // null is present and null. Only the count is asserted, since the value of an absent
+        // argument is JavaScript's undefined and how that renders is not this test's subject.
+        query("{ echoArg }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.echoArg", containsString("count=0"));
     }
 
     @Test

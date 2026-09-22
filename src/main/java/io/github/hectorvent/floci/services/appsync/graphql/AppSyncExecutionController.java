@@ -178,7 +178,7 @@ public class AppSyncExecutionController {
         }
         try (ResolverCallbackSessions.Session session =
                      callbackSessions.open(apiId, authContext.identity(), authContext.authType())) {
-            ResolveSpec resolve = new ResolveSpec(reachableEndpoint.baseUrl() + "/appsync-resolve",
+            ResolveSpec resolve = new ResolveSpec(reachableEndpoint.baseUrl() + "/_floci/appsync/resolve",
                     session.token(), resolveFields, RESOLVE_MAX_BATCH);
             Map<String, Object> result = sidecarClient.execute(preparedSdl, scalars, parsed.query(),
                     parsed.variables(), parsed.operationName(), denyFields, resolve);
